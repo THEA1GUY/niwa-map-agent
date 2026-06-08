@@ -229,10 +229,37 @@ const osmTools: ChatCompletionTool[] = [
   },
 ];
 
+// Report tool — lets the agent compose and generate a downloadable report.
+const reportTool: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "create_report",
+    description:
+      "Generate a downloadable Word/PDF report for the user. Call this ONLY when the user asks for a " +
+      "report, summary document, briefing, or write-up. First gather the needed details with the other " +
+      "tools, then call create_report with a clear title and the COMPLETE report text in the body. " +
+      "The map image is added automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "A short report title." },
+        body: {
+          type: "string",
+          description:
+            "The full report content as plain text (no markdown). Use headings like 'Findings:' on their " +
+            "own line and '- ' for list items. Include observations, OpenStreetMap verification, and conclusions.",
+        },
+      },
+      required: ["title", "body"],
+    },
+  },
+};
+
 /**
  * Agentic answer: the reasoning model answers the user's question and may call the
- * vision tools (ask_vision / zoom_in) and OpenStreetMap tools (lookup_place /
- * find_waterways) repeatedly until it has gathered and verified enough detail.
+ * vision tools (ask_vision / zoom_in), OpenStreetMap tools (lookup_place /
+ * find_waterways), and create_report — repeatedly — until it has gathered and
+ * verified enough detail (and produced a report if asked).
  */
 export async function answerAboutMap(opts: {
   question: string;
@@ -240,10 +267,16 @@ export async function answerAboutMap(opts: {
   overview?: string; // cached first-pass description of the map
   textContext?: string; // for non-image files (PDF/data)
   history: ChatTurn[];
-}): Promise<{ answer: string; steps: Step[] }> {
+  onCreateReport?: (args: { title: string; body: string }) => Promise<{ id: string } | null>;
+}): Promise<{ answer: string; steps: Step[]; report?: { id: string; title: string } }> {
   const hasVision = Boolean(opts.imageBuffer);
   const steps: Step[] = [];
-  const activeTools = [...(hasVision ? visionTools : []), ...osmTools];
+  let report: { id: string; title: string } | undefined;
+  const activeTools = [
+    ...(hasVision ? visionTools : []),
+    ...osmTools,
+    ...(opts.onCreateReport ? [reportTool] : []),
+  ];
 
   const contextParts: string[] = [];
   if (opts.overview)
@@ -267,6 +300,10 @@ export async function answerAboutMap(opts: {
     "Use these to VERIFY what you read on the map and to find features it may have missed. " +
     "When the map and OpenStreetMap agree, say so. When they disagree (e.g. a name you read isn't found), " +
     "flag it as a possible misread. When you use OpenStreetMap, say so (cite it).\n\n" +
+    (opts.onCreateReport
+      ? "When the user asks for a REPORT, summary document, briefing or write-up, gather what you need with " +
+        "the tools, then call create_report with a title and the complete report body. Tell the user the report is ready.\n\n"
+      : "") +
     NO_GUESSING +
     "\nOnly state facts the tools actually confirmed. If a map detail could not be read clearly, say so and suggest a higher-resolution image.\n\n" +
     (context ? "---\n" + context + "\n---\n\n" : "") +
@@ -293,7 +330,7 @@ export async function answerAboutMap(opts: {
 
     const toolCalls = msg.tool_calls ?? [];
     if (toolCalls.length === 0) {
-      return { answer: msg.content ?? "", steps };
+      return { answer: msg.content ?? "", steps, report };
     }
 
     messages.push(msg);
@@ -311,6 +348,20 @@ export async function answerAboutMap(opts: {
           const area = String(args.area ?? "");
           result = await findWaterways(area);
           steps.push({ kind: "osm", label: "OpenStreetMap — waterways", query: area, finding: result });
+        } else if (name === "create_report") {
+          if (opts.onCreateReport) {
+            const title = String(args.title ?? "NIWA Map Report");
+            const body = String(args.body ?? "");
+            const created = await opts.onCreateReport({ title, body });
+            if (created) {
+              report = { id: created.id, title };
+              result = `Report "${title}" created and ready to download.`;
+            } else {
+              result = "Report generation failed.";
+            }
+          } else {
+            result = "Report tool is not available.";
+          }
         } else if (opts.imageBuffer) {
           const q = typeof args.question === "string" ? args.question : opts.question;
           const region: Region =
@@ -354,5 +405,5 @@ export async function answerAboutMap(opts: {
       },
     ],
   }));
-  return { answer: finalRes.choices[0]?.message?.content ?? "", steps };
+  return { answer: finalRes.choices[0]?.message?.content ?? "", steps, report };
 }

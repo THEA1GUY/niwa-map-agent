@@ -1,10 +1,12 @@
+import { randomUUID } from "crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { vision, answerAboutMap, type ChatTurn } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { maps, messages } from "@/lib/schema";
-import { getFile } from "@/lib/storage";
+import { maps, messages, reports } from "@/lib/schema";
+import { buildReport } from "@/lib/reports";
+import { getFile, putFile } from "@/lib/storage";
 import { chatSchema } from "@/lib/validation";
 
 export const maxDuration = 60; // allow time for two model calls
@@ -75,13 +77,26 @@ export async function POST(
   // 3. Agentic answer: reasoning model can query the vision model as needed.
   let answer: string;
   let steps;
+  let report;
   try {
-    ({ answer, steps } = await answerAboutMap({
+    ({ answer, steps, report } = await answerAboutMap({
       question,
       imageBuffer,
       overview,
       textContext,
       history,
+      onCreateReport: async ({ title, body }) => {
+        const { docx, pdf } = await buildReport(title, body, imageBuffer ?? null);
+        const docxKey = randomUUID();
+        const pdfKey = randomUUID();
+        await putFile(docxKey, docx);
+        await putFile(pdfKey, pdf);
+        const [row] = await db
+          .insert(reports)
+          .values({ mapId: map.id, userId: user.id, title, docxKey, pdfKey })
+          .returning();
+        return { id: row.id };
+      },
     }));
   } catch (err) {
     console.error("[chat] answer step failed", err);
@@ -103,5 +118,5 @@ export async function POST(
     },
   ]);
 
-  return NextResponse.json({ answer, steps });
+  return NextResponse.json({ answer, steps, report });
 }

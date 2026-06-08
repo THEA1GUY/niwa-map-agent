@@ -233,3 +233,142 @@ export async function buildPdf(
 
   return Buffer.from(await pdf.save());
 }
+
+// ----------------- Agent-composed report (title + body text) -----------------
+
+function detectImage(buf: Buffer): { type: ImgType; mime: string } | null {
+  if (buf.length > 3 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e)
+    return { type: "png", mime: "image/png" };
+  if (buf.length > 2 && buf[0] === 0xff && buf[1] === 0xd8)
+    return { type: "jpg", mime: "image/jpeg" };
+  return null;
+}
+
+const isHeadingLine = (t: string) => /^[^-\s].{0,60}:$/.test(t);
+
+/** Build Word + PDF from a title and a plain-text body the AI composed. */
+export async function buildReport(
+  title: string,
+  body: string,
+  imageBytes: Buffer | null,
+): Promise<{ docx: Buffer; pdf: Buffer }> {
+  const det = imageBytes ? detectImage(imageBytes) : null;
+
+  // ---- DOCX ----
+  const children: Paragraph[] = [
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [new TextRun({ text: "National Inland Waterways Authority", bold: true, size: 28 })],
+    }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 120 },
+      children: [new TextRun({ text: title, size: 26, color: "1d4e89" })],
+    }),
+    new Paragraph({
+      spacing: { after: 160 },
+      children: [new TextRun({ text: `Generated: ${new Date().toLocaleString()}`, size: 18, color: "888888" })],
+    }),
+  ];
+  if (imageBytes && det) {
+    const size = imageSize(imageBytes, det.mime) ?? { width: 800, height: 600 };
+    const scale = Math.min(1, 540 / size.width);
+    children.push(
+      new Paragraph({
+        spacing: { after: 200 },
+        children: [
+          new ImageRun({
+            type: det.type,
+            data: imageBytes,
+            transformation: {
+              width: Math.round(size.width * scale),
+              height: Math.round(size.height * scale),
+            },
+          }),
+        ],
+      }),
+    );
+  }
+  for (const raw of body.split("\n")) {
+    const t = raw.trimEnd();
+    if (!t) {
+      children.push(new Paragraph({ children: [new TextRun("")] }));
+      continue;
+    }
+    children.push(
+      new Paragraph({ children: [new TextRun({ text: t, size: 22, bold: isHeadingLine(t) })] }),
+    );
+  }
+  const docx = Buffer.from(await Packer.toBuffer(new Document({ sections: [{ children }] })));
+
+  // ---- PDF ----
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const A4 = { w: 595, h: 842 };
+  const margin = 50;
+  const maxW = A4.w - margin * 2;
+  let page = pdf.addPage([A4.w, A4.h]);
+  let y = A4.h - margin;
+  const newPage = () => {
+    page = pdf.addPage([A4.w, A4.h]);
+    y = A4.h - margin;
+  };
+  const write = (
+    text: string,
+    opts: { size?: number; bold?: boolean; color?: [number, number, number] } = {},
+  ) => {
+    const size = opts.size ?? 11;
+    const f = opts.bold ? bold : font;
+    const color = opts.color ?? [0.1, 0.1, 0.1];
+    for (const rawLine of text.split("\n")) {
+      const words = rawLine.split(" ");
+      let line = "";
+      const flush = () => {
+        if (y < margin + size) newPage();
+        page.drawText(line, { x: margin, y, size, font: f, color: rgb(...color) });
+        y -= size + 5;
+      };
+      for (const word of words) {
+        const test = line ? `${line} ${word}` : word;
+        if (f.widthOfTextAtSize(test, size) > maxW && line) {
+          flush();
+          line = word;
+        } else {
+          line = test;
+        }
+      }
+      flush();
+    }
+  };
+  write("National Inland Waterways Authority", { size: 16, bold: true });
+  write(title, { size: 13, bold: true, color: [0.11, 0.31, 0.54] });
+  write(`Generated: ${new Date().toLocaleString()}`, { size: 9, color: [0.5, 0.5, 0.5] });
+  y -= 6;
+  if (imageBytes && det) {
+    try {
+      const emb =
+        det.type === "png" ? await pdf.embedPng(imageBytes) : await pdf.embedJpg(imageBytes);
+      const scale = Math.min(1, maxW / emb.width);
+      const w = emb.width * scale;
+      const h = emb.height * scale;
+      if (y - h < margin) newPage();
+      y -= h;
+      page.drawImage(emb, { x: margin, y, width: w, height: h });
+      y -= 14;
+    } catch {
+      /* skip unsupported image */
+    }
+  }
+  for (const raw of body.split("\n")) {
+    const t = raw.trimEnd();
+    if (!t) {
+      y -= 6;
+      continue;
+    }
+    write(t, { size: 11, bold: isHeadingLine(t) });
+  }
+  const pdfBuf = Buffer.from(await pdf.save());
+
+  return { docx, pdf: pdfBuf };
+}

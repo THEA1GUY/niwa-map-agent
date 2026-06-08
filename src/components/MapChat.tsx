@@ -9,7 +9,13 @@ type Step = {
   thumbnail?: string;
   finding: string;
 };
-type Msg = { role: "user" | "assistant"; content: string; steps?: Step[] };
+type Report = { id: string; title: string };
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  steps?: Step[];
+  report?: Report;
+};
 
 export default function MapChat({
   mapId,
@@ -44,7 +50,7 @@ export default function MapChat({
       }
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: data.answer, steps: data.steps },
+        { role: "assistant", content: data.answer, steps: data.steps, report: data.report },
       ]);
     } catch {
       setError("Could not reach the server.");
@@ -110,6 +116,28 @@ export default function MapChat({
                   ))}
                 </div>
               </details>
+            )}
+
+            {m.report && (
+              <div className="mt-2 w-full max-w-[85%] rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <p className="text-sm font-medium text-emerald-900">
+                  📄 Report ready: {m.report.title}
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <a
+                    href={`/api/reports/${m.report.id}?format=docx`}
+                    className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100"
+                  >
+                    ⬇ Word
+                  </a>
+                  <a
+                    href={`/api/reports/${m.report.id}?format=pdf`}
+                    className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100"
+                  >
+                    ⬇ PDF
+                  </a>
+                </div>
+              </div>
             )}
           </div>
         ))}

@@ -55,6 +55,21 @@ export const fileBlobs = pgTable("file_blobs", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+/** Reports the AI agent composed and generated (downloadable as Word/PDF). */
+export const reports = pgTable("reports", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  mapId: uuid("map_id")
+    .notNull()
+    .references(() => maps.id, { onDelete: "cascade" }),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  docxKey: text("docx_key").notNull(),
+  pdfKey: text("pdf_key").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type MapRow = typeof maps.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
