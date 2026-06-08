@@ -74,8 +74,15 @@ export async function POST(
 
   // 3. Agentic answer: reasoning model can query the vision model as needed.
   let answer: string;
+  let steps;
   try {
-    answer = await answerAboutMap({ question, imageBuffer, overview, textContext, history });
+    ({ answer, steps } = await answerAboutMap({
+      question,
+      imageBuffer,
+      overview,
+      textContext,
+      history,
+    }));
   } catch (err) {
     console.error("[chat] answer step failed", err);
     return NextResponse.json(
@@ -84,11 +91,11 @@ export async function POST(
     );
   }
 
-  // 4. Persist both turns.
+  // 4. Persist both turns (the zoom thumbnails are shown live, not stored).
   await db.insert(messages).values([
     { mapId: map.id, userId: user.id, role: "user", content: question },
     { mapId: map.id, userId: user.id, role: "assistant", content: answer },
   ]);
 
-  return NextResponse.json({ answer });
+  return NextResponse.json({ answer, steps });
 }

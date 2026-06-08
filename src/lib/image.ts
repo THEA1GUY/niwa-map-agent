@@ -57,6 +57,15 @@ function fractions(region: Region): { x0: number; y0: number; x1: number; y1: nu
   }
 }
 
+/** A small JPEG data URL of an image buffer, for showing the user what the AI examined. */
+export async function thumbnailDataUrl(input: Buffer): Promise<string> {
+  const buf = await sharp(input, { failOn: "none" })
+    .resize({ width: 480, height: 480, fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 70 })
+    .toBuffer();
+  return `data:image/jpeg;base64,${buf.toString("base64")}`;
+}
+
 const TARGET = 1600; // magnify the crop so small text becomes legible
 
 /**

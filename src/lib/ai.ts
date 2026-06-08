@@ -3,7 +3,7 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
-import { cropRegion, REGIONS, type Region } from "./image";
+import { cropRegion, REGIONS, thumbnailDataUrl, type Region } from "./image";
 
 /**
  * Agentic map analysis:
@@ -57,14 +57,22 @@ Clearly separate what is OBSERVED from what is INFERRED.`;
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
-/** One vision call against a (possibly cropped + magnified) region of the image. */
-export async function vision(
+/** A record of one thing the agent looked at, surfaced to the user. */
+export type VisionStep = {
+  region: Region;
+  question: string;
+  thumbnail: string; // small JPEG data URL of what was examined
+  finding: string;
+};
+
+/** Crop+magnify a region, ask the vision model about it, and return both the answer and the crop. */
+async function cropAndAsk(
   imageBuffer: Buffer,
   region: Region,
   question: string,
-): Promise<string> {
-  const cropped = await cropRegion(imageBuffer, region);
-  const dataUrl = `data:image/png;base64,${cropped.toString("base64")}`;
+): Promise<{ finding: string; crop: Buffer }> {
+  const crop = await cropRegion(imageBuffer, region);
+  const dataUrl = `data:image/png;base64,${crop.toString("base64")}`;
   const res = await groq.chat.completions.create({
     model: VISION_MODEL,
     temperature: 0,
@@ -93,7 +101,16 @@ export async function vision(
       },
     ],
   });
-  return res.choices[0]?.message?.content ?? "";
+  return { finding: res.choices[0]?.message?.content ?? "", crop };
+}
+
+/** One vision call against a (possibly cropped + magnified) region of the image. */
+export async function vision(
+  imageBuffer: Buffer,
+  region: Region,
+  question: string,
+): Promise<string> {
+  return (await cropAndAsk(imageBuffer, region, question)).finding;
 }
 
 const tools: ChatCompletionTool[] = [
@@ -150,8 +167,9 @@ export async function answerAboutMap(opts: {
   overview?: string; // cached first-pass description of the map
   textContext?: string; // for non-image files (PDF/data)
   history: ChatTurn[];
-}): Promise<string> {
+}): Promise<{ answer: string; steps: VisionStep[] }> {
   const hasVision = Boolean(opts.imageBuffer);
+  const steps: VisionStep[] = [];
 
   const contextParts: string[] = [];
   if (opts.overview)
@@ -195,7 +213,7 @@ export async function answerAboutMap(opts: {
 
     const toolCalls = msg.tool_calls ?? [];
     if (toolCalls.length === 0) {
-      return msg.content ?? "";
+      return { answer: msg.content ?? "", steps };
     }
 
     messages.push(msg);
@@ -207,13 +225,22 @@ export async function answerAboutMap(opts: {
         const q = typeof args.question === "string" ? args.question : opts.question;
         if (!opts.imageBuffer) {
           result = "No image available.";
-        } else if (call.function.name === "zoom_in") {
-          const region = (REGIONS as string[]).includes(args.region)
-            ? (args.region as Region)
-            : "center";
-          result = await vision(opts.imageBuffer, region, q);
         } else {
-          result = await vision(opts.imageBuffer, "full", q);
+          const region: Region =
+            call.function.name === "zoom_in" &&
+            (REGIONS as string[]).includes(args.region)
+              ? (args.region as Region)
+              : call.function.name === "zoom_in"
+                ? "center"
+                : "full";
+          const { finding, crop } = await cropAndAsk(opts.imageBuffer, region, q);
+          result = finding;
+          steps.push({
+            region,
+            question: q,
+            thumbnail: await thumbnailDataUrl(crop),
+            finding,
+          });
         }
       } catch {
         result = "Vision lookup failed.";
@@ -238,5 +265,5 @@ export async function answerAboutMap(opts: {
       },
     ],
   });
-  return finalRes.choices[0]?.message?.content ?? "";
+  return { answer: finalRes.choices[0]?.message?.content ?? "", steps };
 }
