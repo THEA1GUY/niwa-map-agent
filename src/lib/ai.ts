@@ -268,6 +268,7 @@ export async function answerAboutMap(opts: {
   textContext?: string; // for non-image files (PDF/data)
   history: ChatTurn[];
   onCreateReport?: (args: { title: string; body: string }) => Promise<{ id: string } | null>;
+  forceReport?: boolean; // user clearly asked for a report → guarantee one is produced
 }): Promise<{ answer: string; steps: Step[]; report?: { id: string; title: string } }> {
   const hasVision = Boolean(opts.imageBuffer);
   const steps: Step[] = [];
@@ -277,6 +278,18 @@ export async function answerAboutMap(opts: {
     ...osmTools,
     ...(opts.onCreateReport ? [reportTool] : []),
   ];
+
+  // Wrap up an answer. If the user asked for a report but the model only wrote it
+  // as text (didn't call create_report), turn that text into the real report.
+  const finalize = async (content: string) => {
+    if (opts.forceReport && !report && opts.onCreateReport && content.trim().length > 40) {
+      const first = content.split("\n").map((s) => s.trim()).find(Boolean) || "NIWA Map Report";
+      const title = (first.replace(/[:–—-].*$/, "").trim() || "NIWA Map Report").slice(0, 80);
+      const created = await opts.onCreateReport({ title, body: content });
+      if (created) report = { id: created.id, title };
+    }
+    return { answer: content, steps, report };
+  };
 
   const contextParts: string[] = [];
   if (opts.overview)
@@ -330,7 +343,7 @@ export async function answerAboutMap(opts: {
 
     const toolCalls = msg.tool_calls ?? [];
     if (toolCalls.length === 0) {
-      return { answer: msg.content ?? "", steps, report };
+      return await finalize(msg.content ?? "");
     }
 
     messages.push(msg);
@@ -405,5 +418,5 @@ export async function answerAboutMap(opts: {
       },
     ],
   }));
-  return { answer: finalRes.choices[0]?.message?.content ?? "", steps, report };
+  return await finalize(finalRes.choices[0]?.message?.content ?? "");
 }

@@ -85,6 +85,10 @@ export async function POST(
       overview,
       textContext,
       history,
+      forceReport:
+        /\b(report|briefing|write[- ]?up|summary document|generate (a |an )?(report|document|brief)|word doc|pdf)\b/i.test(
+          question,
+        ),
       onCreateReport: async ({ title, body }) => {
         const { docx, pdf } = await buildReport(title, body, imageBuffer ?? null);
         const docxKey = randomUUID();
