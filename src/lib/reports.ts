@@ -10,6 +10,19 @@ import {
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import type { MapRow, MessageRow } from "./schema";
 
+/** Make text safe for pdf-lib's standard (WinAnsi) fonts: map fancy punctuation, drop the rest. */
+function sanitizeWinAnsi(s: string): string {
+  return s
+    .replace(/[        ]/g, " ")
+    .replace(/[‘’‛′]/g, "'")
+    .replace(/[“”″]/g, '"')
+    .replace(/[–—−]/g, "-")
+    .replace(/…/g, "...")
+    .replace(/[•·●▪]/g, "-")
+    .replace(/[✅❌✔✖]/g, "")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, ""); // strip remaining non-ASCII
+}
+
 type ImgType = "png" | "jpg" | "gif";
 
 function imageKind(mime: string): ImgType | null {
@@ -167,7 +180,7 @@ export async function buildPdf(
     const size = opts.size ?? 11;
     const f = opts.bold ? bold : font;
     const color = opts.color ?? [0.1, 0.1, 0.1];
-    for (const rawLine of text.split("\n")) {
+    for (const rawLine of sanitizeWinAnsi(text).split("\n")) {
       const words = rawLine.split(" ");
       let line = "";
       const flush = () => {
@@ -321,7 +334,7 @@ export async function buildReport(
     const size = opts.size ?? 11;
     const f = opts.bold ? bold : font;
     const color = opts.color ?? [0.1, 0.1, 0.1];
-    for (const rawLine of text.split("\n")) {
+    for (const rawLine of sanitizeWinAnsi(text).split("\n")) {
       const words = rawLine.split(" ");
       let line = "";
       const flush = () => {
