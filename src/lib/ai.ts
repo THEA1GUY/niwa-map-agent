@@ -5,6 +5,7 @@ import type {
 } from "openai/resources/chat/completions";
 import { cropRegion, REGIONS, thumbnailDataUrl, type Region } from "./image";
 import { findWaterways, lookupPlace } from "./osm";
+import { webSearch } from "./tavily";
 
 /**
  * Agentic, multi-map analysis. The reasoning model (gpt-oss-120b) drives and may
@@ -29,13 +30,21 @@ const openrouter = new OpenAI({
   },
 });
 
-const useOpenRouter = (process.env.REASONING_PROVIDER ?? "groq") === "openrouter";
-const reasoningClient = useOpenRouter ? openrouter : groq;
+const deepseek = new OpenAI({
+  apiKey: process.env.DEEPSEEK_API_KEY ?? "",
+  baseURL: "https://api.deepseek.com",
+});
+
+const PROVIDER = process.env.REASONING_PROVIDER ?? "groq";
+const reasoningClient =
+  PROVIDER === "openrouter" ? openrouter : PROVIDER === "deepseek" ? deepseek : groq;
 
 const VISION_MODEL =
   process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct";
 const REASONING_MODEL =
-  process.env.OPENROUTER_REASONING_MODEL ?? "openai/gpt-oss-120b";
+  PROVIDER === "deepseek"
+    ? (process.env.DEEPSEEK_MODEL ?? "deepseek-chat")
+    : (process.env.OPENROUTER_REASONING_MODEL ?? "openai/gpt-oss-120b");
 
 const MAX_TOOL_ROUNDS = 4;
 
@@ -85,7 +94,7 @@ export type ChatTurn = { role: "user" | "assistant"; content: string };
 export type MapInput = { name: string; buffer: Buffer };
 
 export type Step = {
-  kind: "vision" | "osm";
+  kind: "vision" | "osm" | "web";
   label: string;
   query: string;
   thumbnail?: string;
@@ -245,6 +254,21 @@ const osmTools: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description:
+        "Search the web (with sources) for factual background not on the map: river lengths, dam " +
+        "capacities, navigation depths, hydrology, history, or recent news. Use when the user wants " +
+        "facts beyond what the map and OpenStreetMap show.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "What to search for." } },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 /** Agentic answer across one or more maps. */
@@ -295,9 +319,14 @@ export async function answerAboutMap(opts: {
         (maps.length > 1 ? "Pass the map number (1-based) to choose which map. " : "") +
         "Use ask_vision for layout then zoom_in to read detail. Treat results as your eyes; never say no image was provided.\n\n"
       : "") +
-    "You also have OpenStreetMap tools: lookup_place and find_waterways. Use them to VERIFY what you read " +
-    "and to find features the maps may have missed. When map and OSM agree, say so; when a name isn't found, " +
-    "flag it as a possible misread. Cite OpenStreetMap when used.\n\n" +
+    "You also have research tools:\n" +
+    "- lookup_place: confirm a river/town/dam exists in OpenStreetMap and get its REAL COORDINATES.\n" +
+    "- find_waterways: list the real rivers/lakes/dams in an area from OpenStreetMap.\n" +
+    "- web_search: get sourced facts from the web (river lengths, dam capacities, hydrology, history).\n" +
+    "ALWAYS verify the main places you mention using lookup_place, and INCLUDE their real coordinates " +
+    "(latitude, longitude) in your answer. When the map and OpenStreetMap agree, say so; when a name is not " +
+    "found, flag it as a possible misread. Use web_search when the user wants facts beyond the map. " +
+    "Cite your sources (OpenStreetMap / web).\n\n" +
     (opts.onCreateReport
       ? "When the user asks for a REPORT, briefing or write-up, gather what you need then call create_report.\n\n"
       : "") +
@@ -351,6 +380,10 @@ export async function answerAboutMap(opts: {
           const area = String(args.area ?? "");
           result = await findWaterways(area);
           steps.push({ kind: "osm", label: "OpenStreetMap — waterways", query: area, finding: result });
+        } else if (name === "web_search") {
+          const query = String(args.query ?? "");
+          result = await webSearch(query);
+          steps.push({ kind: "web", label: "Web search", query, finding: result });
         } else if (name === "create_report") {
           if (opts.onCreateReport) {
             const title = String(args.title ?? "NIWA Map Report");

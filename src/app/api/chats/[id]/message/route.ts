@@ -48,33 +48,42 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     .innerJoin(maps, eq(chatMaps.mapId, maps.id))
     .where(eq(chatMaps.chatId, chat.id));
 
-  const mapInputs: MapInput[] = [];
-  const allImages: Buffer[] = [];
-  const overviews: string[] = [];
+  // Load all files in parallel.
+  const loaded = await Promise.all(
+    mapRows.map(async (m) => ({ m, bytes: await getFile(m.blobKey) })),
+  );
+  const imageMaps = loaded.filter(
+    (x): x is { m: (typeof mapRows)[number]; bytes: Buffer } =>
+      x.bytes !== null && x.m.kind === "image",
+  );
 
-  for (const m of mapRows) {
-    const bytes = await getFile(m.blobKey);
-    if (!bytes) continue;
-    const name = m.title || m.fileName;
-    if (m.kind === "image") {
-      mapInputs.push({ name, buffer: bytes });
-      allImages.push(bytes);
-      let ov = m.analysis ?? undefined;
+  const mapInputs: MapInput[] = imageMaps.map((x) => ({
+    name: x.m.title || x.m.fileName,
+    buffer: x.bytes,
+  }));
+  const allImages: Buffer[] = imageMaps.map((x) => x.bytes);
+
+  // Generate any missing first-pass overviews in parallel (cached for next time).
+  const overviewArr = await Promise.all(
+    imageMaps.map(async (x) => {
+      const name = x.m.title || x.m.fileName;
+      let ov = x.m.analysis ?? undefined;
       if (!ov) {
         try {
           ov = await vision(
-            bytes,
+            x.bytes,
             "full",
             "Concise overview of this map: title, region, main rivers/water bodies, and type of map.",
           );
-          await db.update(maps).set({ analysis: ov }).where(eq(maps.id, m.id));
+          await db.update(maps).set({ analysis: ov }).where(eq(maps.id, x.m.id));
         } catch {
           /* tolerate */
         }
       }
-      if (ov) overviews.push(`Map "${name}": ${ov}`);
-    }
-  }
+      return ov ? `Map "${name}": ${ov}` : "";
+    }),
+  );
+  const overviews = overviewArr.filter(Boolean);
 
   const prior = await db
     .select()

@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 
 type Step = {
-  kind: "vision" | "osm";
+  kind: "vision" | "osm" | "web";
   label: string;
   query: string;
   thumbnail?: string;
@@ -104,7 +104,7 @@ export default function MapChat({
                         />
                       ) : (
                         <div className="flex h-24 w-24 flex-none items-center justify-center rounded border border-slate-200 bg-emerald-50 text-3xl">
-                          🌍
+                          {s.kind === "web" ? "🌐" : "🌍"}
                         </div>
                       )}
                       <div className="min-w-0 text-xs text-slate-600">
