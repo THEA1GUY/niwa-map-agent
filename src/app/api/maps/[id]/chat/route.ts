@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { analyzeImage, reason, type ChatTurn } from "@/lib/ai";
+import { analyzeImage, answerAboutMap, type ChatTurn } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { maps, messages } from "@/lib/schema";
@@ -34,26 +34,25 @@ export async function POST(
     .limit(1);
   if (!map) return NextResponse.json({ error: "Map not found." }, { status: 404 });
 
-  // 1. Vision analysis of the image (cached on the map after the first run).
-  let imageAnalysis = map.analysis ?? undefined;
+  // 1. Prepare the map for the agent: image maps get the ask_vision tool + a
+  //    cached first-pass overview; other files get a text note.
+  let imageDataUrl: string | undefined;
+  let overview = map.analysis ?? undefined;
   let textContext: string | undefined;
 
   if (map.kind === "image") {
-    if (!imageAnalysis) {
-      const bytes = await getFile(map.blobKey);
-      if (bytes) {
-        const dataUrl = `data:${map.mimeType};base64,${bytes.toString("base64")}`;
+    const bytes = await getFile(map.blobKey);
+    if (bytes) {
+      imageDataUrl = `data:${map.mimeType};base64,${bytes.toString("base64")}`;
+      if (!overview) {
         try {
-          imageAnalysis = await analyzeImage(
-            dataUrl,
-            "general detailed interpretation of this map for waterways research",
+          overview = await analyzeImage(
+            imageDataUrl,
+            "Give a concise overview of this map: its title, the region it covers, the main rivers and water bodies, and what type of map it is.",
           );
-          await db
-            .update(maps)
-            .set({ analysis: imageAnalysis })
-            .where(eq(maps.id, map.id));
+          await db.update(maps).set({ analysis: overview }).where(eq(maps.id, map.id));
         } catch (err) {
-          console.error("[chat] vision step failed", err);
+          console.error("[chat] vision overview failed", err);
         }
       }
     }
@@ -72,12 +71,12 @@ export async function POST(
     content: m.content,
   }));
 
-  // 3. Reasoning model produces the answer.
+  // 3. Agentic answer: reasoning model can query the vision model as needed.
   let answer: string;
   try {
-    answer = await reason({ question, imageAnalysis, textContext, history });
+    answer = await answerAboutMap({ question, imageDataUrl, overview, textContext, history });
   } catch (err) {
-    console.error("[chat] reasoning step failed", err);
+    console.error("[chat] answer step failed", err);
     return NextResponse.json(
       { error: "The AI service did not respond. Check your API keys and try again." },
       { status: 502 },
