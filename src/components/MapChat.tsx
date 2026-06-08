@@ -2,7 +2,13 @@
 
 import { useRef, useState } from "react";
 
-type Step = { region: string; question: string; thumbnail: string; finding: string };
+type Step = {
+  kind: "vision" | "osm";
+  label: string;
+  query: string;
+  thumbnail?: string;
+  finding: string;
+};
 type Msg = { role: "user" | "assistant"; content: string; steps?: Step[] };
 
 export default function MapChat({
@@ -77,23 +83,27 @@ export default function MapChat({
             {m.steps && m.steps.length > 0 && (
               <details className="mt-2 w-full max-w-[85%] rounded-lg border border-slate-200 bg-white">
                 <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600">
-                  🔍 What the AI looked at ({m.steps.length}{" "}
-                  {m.steps.length === 1 ? "view" : "views"})
+                  🔍 How the AI worked it out ({m.steps.length}{" "}
+                  {m.steps.length === 1 ? "step" : "steps"})
                 </summary>
                 <div className="space-y-3 border-t border-slate-100 p-3">
                   {m.steps.map((s, j) => (
                     <div key={j} className="flex gap-3">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={s.thumbnail}
-                        alt={`${s.region} view`}
-                        className="h-24 w-24 flex-none rounded border border-slate-200 object-contain bg-slate-50"
-                      />
+                      {s.thumbnail ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={s.thumbnail}
+                          alt={s.label}
+                          className="h-24 w-24 flex-none rounded border border-slate-200 bg-slate-50 object-contain"
+                        />
+                      ) : (
+                        <div className="flex h-24 w-24 flex-none items-center justify-center rounded border border-slate-200 bg-emerald-50 text-3xl">
+                          🌍
+                        </div>
+                      )}
                       <div className="min-w-0 text-xs text-slate-600">
-                        <p className="font-medium text-slate-700">
-                          {s.region === "full" ? "Whole map" : `Zoom: ${s.region}`}
-                        </p>
-                        <p className="italic text-slate-400">“{s.question}”</p>
+                        <p className="font-medium text-slate-700">{s.label}</p>
+                        <p className="italic text-slate-400">“{s.query}”</p>
                         <p className="mt-1 whitespace-pre-wrap">{s.finding}</p>
                       </div>
                     </div>

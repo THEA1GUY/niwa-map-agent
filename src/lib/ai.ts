@@ -4,6 +4,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 import { cropRegion, REGIONS, thumbnailDataUrl, type Region } from "./image";
+import { findWaterways, lookupPlace } from "./osm";
 
 /**
  * Agentic map analysis:
@@ -57,11 +58,12 @@ Clearly separate what is OBSERVED from what is INFERRED.`;
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
-/** A record of one thing the agent looked at, surfaced to the user. */
-export type VisionStep = {
-  region: Region;
-  question: string;
-  thumbnail: string; // small JPEG data URL of what was examined
+/** A record of one thing the agent did to find the answer, surfaced to the user. */
+export type Step = {
+  kind: "vision" | "osm";
+  label: string; // e.g. "Whole map", "Zoom: center", "OpenStreetMap"
+  query: string;
+  thumbnail?: string; // small JPEG data URL — vision crops only
   finding: string;
 };
 
@@ -113,7 +115,7 @@ export async function vision(
   return (await cropAndAsk(imageBuffer, region, question)).finding;
 }
 
-const tools: ChatCompletionTool[] = [
+const visionTools: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -157,9 +159,52 @@ const tools: ChatCompletionTool[] = [
   },
 ];
 
+// OpenStreetMap tools — always available, for verifying and enriching with real geography.
+const osmTools: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "lookup_place",
+      description:
+        "Check OpenStreetMap for whether a place or feature (a river, town, dam, lake) really exists, " +
+        "and get its real coordinates. Use this to VERIFY a name you read on the map and to catch misreads.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "The place/feature name to look up, e.g. 'Gurara River, Nigeria'.",
+          },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_waterways",
+      description:
+        "Get the real rivers, lakes and dams that OpenStreetMap records in/around a named area. " +
+        "Use this to confirm the waterways on the map and to find ones the map may have missed.",
+      parameters: {
+        type: "object",
+        properties: {
+          area: {
+            type: "string",
+            description: "An area or place name, e.g. 'Abuja, Nigeria' or 'Lokoja'.",
+          },
+        },
+        required: ["area"],
+      },
+    },
+  },
+];
+
 /**
  * Agentic answer: the reasoning model answers the user's question and may call the
- * vision tools (ask_vision / zoom_in) repeatedly until it has read enough detail.
+ * vision tools (ask_vision / zoom_in) and OpenStreetMap tools (lookup_place /
+ * find_waterways) repeatedly until it has gathered and verified enough detail.
  */
 export async function answerAboutMap(opts: {
   question: string;
@@ -167,9 +212,10 @@ export async function answerAboutMap(opts: {
   overview?: string; // cached first-pass description of the map
   textContext?: string; // for non-image files (PDF/data)
   history: ChatTurn[];
-}): Promise<{ answer: string; steps: VisionStep[] }> {
+}): Promise<{ answer: string; steps: Step[] }> {
   const hasVision = Boolean(opts.imageBuffer);
-  const steps: VisionStep[] = [];
+  const steps: Step[] = [];
+  const activeTools = [...(hasVision ? visionTools : []), ...osmTools];
 
   const contextParts: string[] = [];
   if (opts.overview)
@@ -181,14 +227,20 @@ export async function answerAboutMap(opts: {
     PERSONA +
     "\n\n" +
     (hasVision
-      ? "A map IMAGE has been uploaded. You cannot see it directly, but you have two tools:\n" +
+      ? "A map IMAGE has been uploaded. You cannot see it directly, but you have vision tools:\n" +
         "- ask_vision: view the WHOLE map (use first, to learn the layout).\n" +
-        "- zoom_in: magnify ONE region to read small text accurately (use this to read legends, tables, and dense labels).\n" +
-        "Plan: first use ask_vision to find where things are, then zoom_in on the relevant regions to read the exact details before answering. " +
-        "Call the tools as many times as needed. Treat their replies as your eyes; never say no image was provided.\n\n" +
-        NO_GUESSING +
-        "\nOnly state facts the tools actually confirmed. If a detail could not be read clearly, tell the user it was not legible and suggest uploading a higher-resolution image.\n\n"
+        "- zoom_in: magnify ONE region to read small text accurately (legends, tables, dense labels).\n" +
+        "Plan: use ask_vision for layout, then zoom_in on the relevant regions to read exact details. " +
+        "Treat their replies as your eyes; never say no image was provided.\n\n"
       : "") +
+    "You also have OpenStreetMap tools (real-world geographic data):\n" +
+    "- lookup_place: confirm a name you read (river, town, dam) actually exists and get its real coordinates.\n" +
+    "- find_waterways: list the real rivers, lakes and dams in an area.\n" +
+    "Use these to VERIFY what you read on the map and to find features it may have missed. " +
+    "When the map and OpenStreetMap agree, say so. When they disagree (e.g. a name you read isn't found), " +
+    "flag it as a possible misread. When you use OpenStreetMap, say so (cite it).\n\n" +
+    NO_GUESSING +
+    "\nOnly state facts the tools actually confirmed. If a map detail could not be read clearly, say so and suggest a higher-resolution image.\n\n" +
     (context ? "---\n" + context + "\n---\n\n" : "") +
     PLAIN_TEXT_RULE;
 
@@ -204,8 +256,8 @@ export async function answerAboutMap(opts: {
       temperature: 0,
       max_tokens: 1500,
       messages,
-      tools: hasVision ? tools : undefined,
-      tool_choice: hasVision ? "auto" : undefined,
+      tools: activeTools.length ? activeTools : undefined,
+      tool_choice: activeTools.length ? "auto" : undefined,
     });
 
     const msg = res.choices[0]?.message;
@@ -222,28 +274,37 @@ export async function answerAboutMap(opts: {
       let result = "";
       try {
         const args = JSON.parse(call.function.arguments || "{}");
-        const q = typeof args.question === "string" ? args.question : opts.question;
-        if (!opts.imageBuffer) {
-          result = "No image available.";
-        } else {
+        const name = call.function.name;
+        if (name === "lookup_place") {
+          const query = String(args.query ?? "");
+          result = await lookupPlace(query);
+          steps.push({ kind: "osm", label: "OpenStreetMap — place check", query, finding: result });
+        } else if (name === "find_waterways") {
+          const area = String(args.area ?? "");
+          result = await findWaterways(area);
+          steps.push({ kind: "osm", label: "OpenStreetMap — waterways", query: area, finding: result });
+        } else if (opts.imageBuffer) {
+          const q = typeof args.question === "string" ? args.question : opts.question;
           const region: Region =
-            call.function.name === "zoom_in" &&
-            (REGIONS as string[]).includes(args.region)
+            name === "zoom_in" && (REGIONS as string[]).includes(args.region)
               ? (args.region as Region)
-              : call.function.name === "zoom_in"
+              : name === "zoom_in"
                 ? "center"
                 : "full";
           const { finding, crop } = await cropAndAsk(opts.imageBuffer, region, q);
           result = finding;
           steps.push({
-            region,
-            question: q,
+            kind: "vision",
+            label: region === "full" ? "Whole map" : `Zoom: ${region}`,
+            query: q,
             thumbnail: await thumbnailDataUrl(crop),
             finding,
           });
+        } else {
+          result = "No image available.";
         }
       } catch {
-        result = "Vision lookup failed.";
+        result = "Tool lookup failed.";
       }
       messages.push({ role: "tool", tool_call_id: call.id, content: result });
     }
