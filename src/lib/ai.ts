@@ -76,14 +76,21 @@ export async function reason(opts: {
     parts.push(`EXTRACTED DOCUMENT / DATA CONTENT:\n${opts.textContext}`);
   const context = parts.join("\n\n") || "No additional extracted context is available.";
 
+  // Everything goes in ONE system message. Critically, we tell the model the
+  // vision analysis IS its eyes — otherwise it replies "no image was provided".
+  const systemContent =
+    SYSTEM_PROMPT +
+    "\n\nThe user has uploaded a map/document. You cannot open the raw file, but " +
+    "the material below was produced from it (a vision model described the image, " +
+    "and/or text was extracted). Treat it as a faithful, first-hand view of the " +
+    "uploaded item and answer confidently as if you can see it. Never tell the user " +
+    "the image was not provided.\n\n" +
+    "---\n" +
+    context +
+    "\n---";
+
   const messages: ChatCompletionMessageParam[] = [
-    {
-      role: "system",
-      content:
-        SYSTEM_PROMPT +
-        "\n\nUse the context below (derived from the user's uploaded map/document) to answer.",
-    },
-    { role: "system", content: context },
+    { role: "system", content: systemContent },
     ...opts.history,
     { role: "user", content: opts.question },
   ];
