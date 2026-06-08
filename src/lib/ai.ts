@@ -38,7 +38,35 @@ const VISION_MODEL =
 const REASONING_MODEL =
   process.env.OPENROUTER_REASONING_MODEL ?? "openai/gpt-oss-120b";
 
-const MAX_TOOL_ROUNDS = 6;
+const MAX_TOOL_ROUNDS = 4;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Parse "try again in 9.105s" out of a Groq rate-limit message. */
+function retryDelayMs(err: unknown): number {
+  const e = err as { headers?: { get?: (k: string) => string | null }; message?: string };
+  const header = Number(e?.headers?.get?.("retry-after"));
+  if (header > 0) return Math.min(header, 15) * 1000;
+  const m = /try again in ([\d.]+)s/i.exec(e?.message ?? "");
+  if (m) return Math.min(parseFloat(m[1]), 15) * 1000 + 400;
+  return 8000;
+}
+
+/** Run a model call, retrying once or twice if we hit a 429 rate limit. */
+async function withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      if (status === 429 && attempt < tries - 1) {
+        await sleep(retryDelayMs(err));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 const PLAIN_TEXT_RULE = `Write for a general reader who may not understand markdown. Use plain text only:
 - Do NOT use markdown. No asterisks for bold, no "#" headings, no "|" tables, no backticks.
@@ -75,10 +103,10 @@ async function cropAndAsk(
 ): Promise<{ finding: string; crop: Buffer }> {
   const crop = await cropRegion(imageBuffer, region);
   const dataUrl = `data:image/png;base64,${crop.toString("base64")}`;
-  const res = await groq.chat.completions.create({
+  const res = await withRetry(() => groq.chat.completions.create({
     model: VISION_MODEL,
     temperature: 0,
-    max_tokens: 1000,
+    max_tokens: 700,
     messages: [
       {
         role: "system",
@@ -102,7 +130,7 @@ async function cropAndAsk(
         ],
       },
     ],
-  });
+  }));
   return { finding: res.choices[0]?.message?.content ?? "", crop };
 }
 
@@ -251,14 +279,14 @@ export async function answerAboutMap(opts: {
   ];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const res = await reasoningClient.chat.completions.create({
+    const res = await withRetry(() => reasoningClient.chat.completions.create({
       model: REASONING_MODEL,
       temperature: 0,
-      max_tokens: 1500,
+      max_tokens: 1200,
       messages,
       tools: activeTools.length ? activeTools : undefined,
       tool_choice: activeTools.length ? "auto" : undefined,
-    });
+    }));
 
     const msg = res.choices[0]?.message;
     if (!msg) break;
@@ -311,10 +339,10 @@ export async function answerAboutMap(opts: {
   }
 
   // Out of tool rounds — force a final answer with what was gathered.
-  const finalRes = await reasoningClient.chat.completions.create({
+  const finalRes = await withRetry(() => reasoningClient.chat.completions.create({
     model: REASONING_MODEL,
     temperature: 0,
-    max_tokens: 1500,
+    max_tokens: 1200,
     messages: [
       ...messages,
       {
@@ -325,6 +353,6 @@ export async function answerAboutMap(opts: {
           PLAIN_TEXT_RULE,
       },
     ],
-  });
+  }));
   return { answer: finalRes.choices[0]?.message?.content ?? "", steps };
 }
