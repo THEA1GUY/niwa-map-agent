@@ -30,8 +30,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files (real keys never committed)
 .env*
+!.env.example
+
+# local uploaded-file fallback store (dev only)
+/.data/
 
 # vercel
 .vercel

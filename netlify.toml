@@ -1,0 +1,10 @@
+# Netlify build settings for the NIWA Map Agent (Next.js).
+# Netlify auto-detects Next.js and adds the official runtime plugin,
+# so this file just pins the basics.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"

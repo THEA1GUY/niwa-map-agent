@@ -1,36 +1,92 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🌊 NIWA Map Agent
 
-## Getting Started
+A web app for the **National Inland Waterways Authority**. Log in, upload a map
+(scan, photo, chart, or PDF), **chat with an AI assistant** about it, and
+**download a Word or PDF report** of the findings.
 
-First, run the development server:
+- **Vision (looking at maps):** Llama 4 Scout, via **Groq**
+- **Reasoning / writing:** gpt-oss-120b, via **OpenRouter**
+- **Hosting:** Netlify · **Database:** Netlify DB (Neon Postgres) · **File storage:** Netlify Blobs
+
+> This is **Phase 1**: images, photos, and PDFs. Survey spreadsheets (Phase 2) and
+> full GIS files like shapefiles/GeoTIFF (Phase 3) come later.
+
+---
+
+## 🟢 Plain-English setup (first time)
+
+You need a free **Netlify** account and your two AI keys (**Groq** and **OpenRouter**).
+
+### 1. Get the project running locally (optional but recommended)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env.local      # then open .env.local and fill in the values
+npm run dev                     # open http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Fill these into `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Setting | Where to get it |
+|---|---|
+| `DATABASE_URL` | Netlify dashboard → your site → **Storage** → create a Neon database → copy connection string |
+| `AUTH_SECRET` | Run `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` and paste the result |
+| `GROQ_API_KEY` | https://console.groq.com → API Keys |
+| `OPENROUTER_API_KEY` | https://openrouter.ai → Keys |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 2. Create the database tables (one time)
 
-## Learn More
+```bash
+npm run db:push
+```
 
-To learn more about Next.js, take a look at the following resources:
+This reads `src/lib/schema.ts` and creates the `users`, `maps`, and `messages`
+tables in your Neon database.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 3. Deploy to Netlify
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. Push to GitHub (already done — see the repo).
+2. In Netlify: **Add new site → Import from GitHub →** pick this repo.
+3. Under **Storage**, add a **Neon** database (this fills `DATABASE_URL` automatically).
+4. Under **Site settings → Environment variables**, add: `AUTH_SECRET`,
+   `GROQ_API_KEY`, `OPENROUTER_API_KEY` (and optionally the model names).
+5. Deploy. Your site goes live at `https://<your-site>.netlify.app`.
+6. Visit the site, click **Create an account**, and you're in.
 
-## Deploy on Vercel
+---
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 🧑‍💻 Day-to-day operations
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- **Add a user:** there's no admin panel yet — anyone can self-register on the
+  `/register` page. (Locking this down to NIWA staff is a good Phase-2 task.)
+- **Change an API key:** update it in Netlify → Environment variables, then
+  redeploy (or trigger a deploy).
+- **Costs:** you pay Groq + OpenRouter per use; both have dashboards showing usage.
+- **If something breaks:** check Netlify → **Deploys** (build errors) and
+  **Functions / Logs** (runtime errors). The most common cause is a missing or
+  wrong environment variable.
+
+## 🔒 Security notes
+
+- Passwords are hashed (bcrypt); login sessions are signed cookies (`AUTH_SECRET`).
+- API keys live only in environment variables — **never** in the code or git.
+- Uploaded maps are private to the user who uploaded them.
+- ⚠️ Maps are sent to Groq/OpenRouter (cloud) for analysis. Don't upload
+  classified material until an in-house option is added.
+
+## 🗂️ Project layout
+
+```
+src/
+  app/
+    login, register, dashboard, maps/[id]   # pages
+    api/auth/...                             # register / login / logout
+    api/maps/...                             # upload, file, chat, report
+  components/                                # AuthForm, Header, UploadForm, MapChat
+  lib/
+    db.ts, schema.ts        # database
+    auth.ts                 # passwords + sessions
+    storage.ts              # file storage (Netlify Blobs / local)
+    ai.ts                   # Groq vision + OpenRouter reasoning
+    reports.ts              # Word + PDF generation
+```
