@@ -52,11 +52,11 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
     <>
       <Header userName={user.name} />
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
-        <div className="mb-4">
-          <Link href="/dashboard" className="text-sm text-sky-700 hover:underline">
+        <div className="mb-5">
+          <Link href="/dashboard" className="text-sm font-medium text-brand-700 hover:underline">
             ← All chats
           </Link>
-          <h1 className="text-xl font-semibold text-slate-900">{chat.title}</h1>
+          <h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">{chat.title}</h1>
           <p className="text-xs text-slate-500">
             {mapRows.length} map{mapRows.length === 1 ? "" : "s"} in this chat
           </p>
@@ -65,7 +65,7 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
         <div className="grid gap-6 lg:grid-cols-2">
           <section className="space-y-3">
             {mapRows.map((m) => (
-              <div key={m.id} className="rounded-lg border border-slate-200 bg-white p-2">
+              <div key={m.id} className="panel p-2">
                 <p className="px-1 pb-2 text-xs font-medium text-slate-600">{m.title}</p>
                 {m.kind === "image" ? (
                   // eslint-disable-next-line @next/next/no-img-element

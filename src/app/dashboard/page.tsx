@@ -41,17 +41,19 @@ export default async function DashboardPage() {
   return (
     <>
       <Header userName={user.name} />
-      <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
-        <h1 className="text-xl font-semibold text-slate-900">Your workspace</h1>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+          Hello, {user.name.split(" ")[0]}
+        </h1>
         <p className="mt-1 text-sm text-slate-500">
-          Upload maps, then select one or more to chat with the AI about them.
+          Upload maps, then pick one or more to <span className="brand-text font-semibold">chat with the AI</span> about them.
         </p>
 
         <div className="mt-6">
           <UploadForm />
         </div>
 
-        <div className="mt-8">
+        <div className="mt-10">
           <DashboardClient maps={mapRows} chats={chatsData} />
         </div>
       </main>
