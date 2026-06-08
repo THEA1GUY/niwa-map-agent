@@ -94,7 +94,13 @@ export async function POST(
   // 4. Persist both turns (the zoom thumbnails are shown live, not stored).
   await db.insert(messages).values([
     { mapId: map.id, userId: user.id, role: "user", content: question },
-    { mapId: map.id, userId: user.id, role: "assistant", content: answer },
+    {
+      mapId: map.id,
+      userId: user.id,
+      role: "assistant",
+      content: answer,
+      meta: JSON.stringify(steps ?? []),
+    },
   ]);
 
   return NextResponse.json({ answer, steps });

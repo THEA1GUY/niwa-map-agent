@@ -7,6 +7,23 @@ import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { maps, messages } from "@/lib/schema";
 
+type Step = {
+  kind: "vision" | "osm";
+  label: string;
+  query: string;
+  thumbnail?: string;
+  finding: string;
+};
+
+function safeParseSteps(meta: string): Step[] | undefined {
+  try {
+    const parsed = JSON.parse(meta);
+    return Array.isArray(parsed) && parsed.length ? (parsed as Step[]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export default async function MapPage({
   params,
 }: {
@@ -86,6 +103,7 @@ export default async function MapPage({
               initialMessages={msgs.map((m) => ({
                 role: m.role === "assistant" ? "assistant" : "user",
                 content: m.content,
+                steps: m.meta ? safeParseSteps(m.meta) : undefined,
               }))}
             />
           </section>

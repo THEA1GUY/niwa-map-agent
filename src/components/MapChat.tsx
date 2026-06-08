@@ -81,7 +81,7 @@ export default function MapChat({
             </div>
 
             {m.steps && m.steps.length > 0 && (
-              <details className="mt-2 w-full max-w-[85%] rounded-lg border border-slate-200 bg-white">
+              <details open className="mt-2 w-full max-w-[85%] rounded-lg border border-slate-200 bg-white">
                 <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-slate-600">
                   🔍 How the AI worked it out ({m.steps.length}{" "}
                   {m.steps.length === 1 ? "step" : "steps"})

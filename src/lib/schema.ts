@@ -39,6 +39,8 @@ export const messages = pgTable("messages", {
   /** user | assistant */
   role: text("role").notNull(),
   content: text("content").notNull(),
+  /** JSON-encoded VisionStep[] for assistant messages (the zoom crops + lookups) */
+  meta: text("meta"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
