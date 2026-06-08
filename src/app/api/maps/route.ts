@@ -5,7 +5,7 @@ import { db } from "@/lib/db";
 import { maps } from "@/lib/schema";
 import { putFile } from "@/lib/storage";
 
-const MAX_BYTES = 15 * 1024 * 1024; // 15 MB
+const MAX_BYTES = 15 * 1024 * 1024; // 15 MB per file
 
 function kindFor(mime: string): string {
   if (mime === "application/pdf") return "pdf";
@@ -20,37 +20,33 @@ export async function POST(req: Request) {
   }
 
   const form = await req.formData().catch(() => null);
-  const file = form?.get("file");
-  if (!(file instanceof File) || file.size === 0) {
+  const files = (form?.getAll("file") ?? []).filter(
+    (f): f is File => f instanceof File && f.size > 0,
+  );
+  if (files.length === 0) {
     return NextResponse.json({ error: "No file provided." }, { status: 400 });
   }
-  if (file.size > MAX_BYTES) {
-    return NextResponse.json(
-      { error: "File is too large (max 15 MB)." },
-      { status: 413 },
-    );
+  if (files.some((f) => f.size > MAX_BYTES)) {
+    return NextResponse.json({ error: "Each file must be 15 MB or smaller." }, { status: 413 });
   }
 
-  const title =
-    (typeof form?.get("title") === "string" && (form.get("title") as string).trim()) ||
-    file.name ||
-    "Untitled map";
+  const ids: string[] = [];
+  for (const file of files) {
+    const blobKey = randomUUID();
+    await putFile(blobKey, Buffer.from(await file.arrayBuffer()));
+    const [row] = await db
+      .insert(maps)
+      .values({
+        userId: user.id,
+        title: file.name || "Untitled map",
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        blobKey,
+        kind: kindFor(file.type),
+      })
+      .returning({ id: maps.id });
+    ids.push(row.id);
+  }
 
-  const blobKey = randomUUID();
-  const buffer = Buffer.from(await file.arrayBuffer());
-  await putFile(blobKey, buffer);
-
-  const [row] = await db
-    .insert(maps)
-    .values({
-      userId: user.id,
-      title,
-      fileName: file.name,
-      mimeType: file.type || "application/octet-stream",
-      blobKey,
-      kind: kindFor(file.type),
-    })
-    .returning();
-
-  return NextResponse.json({ id: row.id });
+  return NextResponse.json({ ids });
 }

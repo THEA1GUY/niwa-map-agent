@@ -18,10 +18,10 @@ type Msg = {
 };
 
 export default function MapChat({
-  mapId,
+  chatId,
   initialMessages,
 }: {
-  mapId: string;
+  chatId: string;
   initialMessages: Msg[];
 }) {
   const [messages, setMessages] = useState<Msg[]>(initialMessages);
@@ -38,7 +38,7 @@ export default function MapChat({
     if (inputRef.current) inputRef.current.value = "";
     setLoading(true);
     try {
-      const res = await fetch(`/api/maps/${mapId}/chat`, {
+      const res = await fetch(`/api/chats/${chatId}/message`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),

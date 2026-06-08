@@ -1,24 +1,21 @@
 import { randomUUID } from "crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { vision, answerAboutMap, type ChatTurn } from "@/lib/ai";
+import { answerAboutMap, vision, type ChatTurn, type MapInput } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { maps, messages, reports } from "@/lib/schema";
 import { buildReport } from "@/lib/reports";
+import { chatMaps, chats, maps, messages, reports } from "@/lib/schema";
 import { getFile, putFile } from "@/lib/storage";
 import { chatSchema } from "@/lib/validation";
 
-export const maxDuration = 60; // allow time for two model calls
+export const maxDuration = 60;
 
-export async function POST(
-  req: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
 
-  const { id } = await params;
+  const { id: chatId } = await params;
   const body = await req.json().catch(() => null);
   const parsed = chatSchema.safeParse(body);
   if (!parsed.success) {
@@ -29,75 +26,88 @@ export async function POST(
   }
   const question = parsed.data.question;
 
-  const [map] = await db
+  const [chat] = await db
     .select()
-    .from(maps)
-    .where(and(eq(maps.id, id), eq(maps.userId, user.id)))
+    .from(chats)
+    .where(and(eq(chats.id, chatId), eq(chats.userId, user.id)))
     .limit(1);
-  if (!map) return NextResponse.json({ error: "Map not found." }, { status: 404 });
+  if (!chat) return NextResponse.json({ error: "Chat not found." }, { status: 404 });
 
-  // 1. Prepare the map for the agent: image maps get the ask_vision tool + a
-  //    cached first-pass overview; other files get a text note.
-  let imageBuffer: Buffer | undefined;
-  let overview = map.analysis ?? undefined;
-  let textContext: string | undefined;
+  // Load the chat's maps (only images get vision; build buffers + cached overviews).
+  const mapRows = await db
+    .select({
+      id: maps.id,
+      title: maps.title,
+      fileName: maps.fileName,
+      mimeType: maps.mimeType,
+      blobKey: maps.blobKey,
+      kind: maps.kind,
+      analysis: maps.analysis,
+    })
+    .from(chatMaps)
+    .innerJoin(maps, eq(chatMaps.mapId, maps.id))
+    .where(eq(chatMaps.chatId, chat.id));
 
-  if (map.kind === "image") {
-    const bytes = await getFile(map.blobKey);
-    if (bytes) {
-      imageBuffer = bytes;
-      if (!overview) {
+  const mapInputs: MapInput[] = [];
+  const allImages: Buffer[] = [];
+  const overviews: string[] = [];
+
+  for (const m of mapRows) {
+    const bytes = await getFile(m.blobKey);
+    if (!bytes) continue;
+    const name = m.title || m.fileName;
+    if (m.kind === "image") {
+      mapInputs.push({ name, buffer: bytes });
+      allImages.push(bytes);
+      let ov = m.analysis ?? undefined;
+      if (!ov) {
         try {
-          overview = await vision(
+          ov = await vision(
             bytes,
             "full",
-            "Give a concise overview of this map: its title, the region it covers, the main rivers and water bodies, and what type of map it is.",
+            "Concise overview of this map: title, region, main rivers/water bodies, and type of map.",
           );
-          await db.update(maps).set({ analysis: overview }).where(eq(maps.id, map.id));
-        } catch (err) {
-          console.error("[chat] vision overview failed", err);
+          await db.update(maps).set({ analysis: ov }).where(eq(maps.id, m.id));
+        } catch {
+          /* tolerate */
         }
       }
+      if (ov) overviews.push(`Map "${name}": ${ov}`);
     }
-  } else {
-    textContext = `The uploaded file "${map.fileName}" is a ${map.kind.toUpperCase()} file. Direct content extraction for this file type is not available yet (planned for a later phase), so answer using general waterways/cartographic knowledge and clearly note this limitation.`;
   }
 
-  // 2. Load recent conversation history.
   const prior = await db
     .select()
     .from(messages)
-    .where(eq(messages.mapId, map.id))
+    .where(eq(messages.chatId, chat.id))
     .orderBy(asc(messages.createdAt));
   const history: ChatTurn[] = prior.slice(-20).map((m) => ({
     role: m.role === "assistant" ? "assistant" : "user",
     content: m.content,
   }));
 
-  // 3. Agentic answer: reasoning model can query the vision model as needed.
   let answer: string;
   let steps;
   let report;
   try {
     ({ answer, steps, report } = await answerAboutMap({
       question,
-      imageBuffer,
-      overview,
-      textContext,
+      maps: mapInputs,
+      overview: overviews.join("\n\n") || undefined,
       history,
       forceReport:
         /\b(report|briefing|write[- ]?up|summary document|generate (a |an )?(report|document|brief)|word doc|pdf)\b/i.test(
           question,
         ),
       onCreateReport: async ({ title, body }) => {
-        const { docx, pdf } = await buildReport(title, body, imageBuffer ?? null);
+        const { docx, pdf } = await buildReport(title, body, allImages);
         const docxKey = randomUUID();
         const pdfKey = randomUUID();
         await putFile(docxKey, docx);
         await putFile(pdfKey, pdf);
         const [row] = await db
           .insert(reports)
-          .values({ mapId: map.id, userId: user.id, title, docxKey, pdfKey })
+          .values({ chatId: chat.id, userId: user.id, title, docxKey, pdfKey })
           .returning();
         return { id: row.id };
       },
@@ -110,11 +120,10 @@ export async function POST(
     );
   }
 
-  // 4. Persist both turns (the zoom thumbnails are shown live, not stored).
   await db.insert(messages).values([
-    { mapId: map.id, userId: user.id, role: "user", content: question },
+    { chatId: chat.id, userId: user.id, role: "user", content: question },
     {
-      mapId: map.id,
+      chatId: chat.id,
       userId: user.id,
       role: "assistant",
       content: answer,

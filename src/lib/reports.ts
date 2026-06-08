@@ -263,10 +263,8 @@ const isHeadingLine = (t: string) => /^[^-\s].{0,60}:$/.test(t);
 export async function buildReport(
   title: string,
   body: string,
-  imageBytes: Buffer | null,
+  images: Buffer[],
 ): Promise<{ docx: Buffer; pdf: Buffer }> {
-  const det = imageBytes ? detectImage(imageBytes) : null;
-
   // ---- DOCX ----
   const children: Paragraph[] = [
     new Paragraph({
@@ -283,8 +281,10 @@ export async function buildReport(
       children: [new TextRun({ text: `Generated: ${new Date().toLocaleString()}`, size: 18, color: "888888" })],
     }),
   ];
-  if (imageBytes && det) {
-    const size = imageSize(imageBytes, det.mime) ?? { width: 800, height: 600 };
+  for (const img of images) {
+    const det = detectImage(img);
+    if (!det) continue;
+    const size = imageSize(img, det.mime) ?? { width: 800, height: 600 };
     const scale = Math.min(1, 540 / size.width);
     children.push(
       new Paragraph({
@@ -292,7 +292,7 @@ export async function buildReport(
         children: [
           new ImageRun({
             type: det.type,
-            data: imageBytes,
+            data: img,
             transformation: {
               width: Math.round(size.width * scale),
               height: Math.round(size.height * scale),
@@ -358,10 +358,11 @@ export async function buildReport(
   write(title, { size: 13, bold: true, color: [0.11, 0.31, 0.54] });
   write(`Generated: ${new Date().toLocaleString()}`, { size: 9, color: [0.5, 0.5, 0.5] });
   y -= 6;
-  if (imageBytes && det) {
+  for (const img of images) {
+    const det = detectImage(img);
+    if (!det) continue;
     try {
-      const emb =
-        det.type === "png" ? await pdf.embedPng(imageBytes) : await pdf.embedJpg(imageBytes);
+      const emb = det.type === "png" ? await pdf.embedPng(img) : await pdf.embedJpg(img);
       const scale = Math.min(1, maxW / emb.width);
       const w = emb.width * scale;
       const h = emb.height * scale;

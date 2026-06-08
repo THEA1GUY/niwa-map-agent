@@ -7,13 +7,12 @@ import { cropRegion, REGIONS, thumbnailDataUrl, type Region } from "./image";
 import { findWaterways, lookupPlace } from "./osm";
 
 /**
- * Agentic map analysis:
- *  - Groq runs the VISION model (Llama 4 Scout) that reads the image.
- *  - The REASONING model (gpt-oss-120b) drives, and can call the vision model as
- *    tools: ask_vision (whole map, for layout) and zoom_in (a magnified region,
- *    for reading small text accurately). It keeps querying until it can answer.
+ * Agentic, multi-map analysis. The reasoning model (gpt-oss-120b) drives and may
+ * call tools: ask_vision / zoom_in (Groq Llama 4 Scout, on any of the chat's
+ * maps), lookup_place / find_waterways (OpenStreetMap), and create_report.
  *
- * Reasoning defaults to Groq (fast). Set REASONING_PROVIDER=openrouter to switch.
+ * Reasoning defaults to Groq (fast, fits serverless time limits). Set
+ * REASONING_PROVIDER=openrouter to switch.
  */
 
 const groq = new OpenAI({
@@ -42,7 +41,6 @@ const MAX_TOOL_ROUNDS = 4;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Parse "try again in 9.105s" out of a Groq rate-limit message. */
 function retryDelayMs(err: unknown): number {
   const e = err as { headers?: { get?: (k: string) => string | null }; message?: string };
   const header = Number(e?.headers?.get?.("retry-after"));
@@ -52,7 +50,6 @@ function retryDelayMs(err: unknown): number {
   return 8000;
 }
 
-/** Run a model call, retrying once or twice if we hit a 429 rate limit. */
 async function withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -74,7 +71,6 @@ const PLAIN_TEXT_RULE = `Write for a general reader who may not understand markd
 - For a list, start each line with "- " (a hyphen and a space).
 - Keep paragraphs short and clear.`;
 
-// Accuracy rule shared by every model call.
 const NO_GUESSING = `Accuracy is critical. Report ONLY what is clearly legible.
 - Transcribe exact text, names, numbers and table values that you can actually read.
 - If something is too small, blurry, or cut off to read with confidence, say it is "not clearly legible" — do NOT guess or invent place names, river names, numbers, or distances.
@@ -86,16 +82,17 @@ Clearly separate what is OBSERVED from what is INFERRED.`;
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
-/** A record of one thing the agent did to find the answer, surfaced to the user. */
+export type MapInput = { name: string; buffer: Buffer };
+
 export type Step = {
   kind: "vision" | "osm";
-  label: string; // e.g. "Whole map", "Zoom: center", "OpenStreetMap"
+  label: string;
   query: string;
-  thumbnail?: string; // small JPEG data URL — vision crops only
+  thumbnail?: string;
   finding: string;
 };
 
-/** Crop+magnify a region, ask the vision model about it, and return both the answer and the crop. */
+/** One vision call against a (possibly cropped + magnified) region, returning answer + crop. */
 async function cropAndAsk(
   imageBuffer: Buffer,
   region: Region,
@@ -103,38 +100,40 @@ async function cropAndAsk(
 ): Promise<{ finding: string; crop: Buffer }> {
   const crop = await cropRegion(imageBuffer, region);
   const dataUrl = `data:image/png;base64,${crop.toString("base64")}`;
-  const res = await withRetry(() => groq.chat.completions.create({
-    model: VISION_MODEL,
-    temperature: 0,
-    max_tokens: 700,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are an expert at reading maps and charts. Read the image carefully and answer the question. " +
-          NO_GUESSING +
-          " " +
-          PLAIN_TEXT_RULE,
-      },
-      {
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text:
-              (region === "full"
-                ? "This is the full map. "
-                : `This is a magnified view of the "${region}" region of the map. `) + question,
-          },
-          { type: "image_url", image_url: { url: dataUrl } },
-        ],
-      },
-    ],
-  }));
+  const res = await withRetry(() =>
+    groq.chat.completions.create({
+      model: VISION_MODEL,
+      temperature: 0,
+      max_tokens: 700,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are an expert at reading maps and charts. Read the image carefully and answer the question. " +
+            NO_GUESSING +
+            " " +
+            PLAIN_TEXT_RULE,
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                (region === "full"
+                  ? "This is the full map. "
+                  : `This is a magnified view of the "${region}" region of the map. `) + question,
+            },
+            { type: "image_url", image_url: { url: dataUrl } },
+          ],
+        },
+      ],
+    }),
+  );
   return { finding: res.choices[0]?.message?.content ?? "", crop };
 }
 
-/** One vision call against a (possibly cropped + magnified) region of the image. */
+/** Public single-image vision helper (used to generate the first-pass overview). */
 export async function vision(
   imageBuffer: Buffer,
   region: Region,
@@ -143,67 +142,91 @@ export async function vision(
   return (await cropAndAsk(imageBuffer, region, question)).finding;
 }
 
-const visionTools: ChatCompletionTool[] = [
-  {
-    type: "function",
-    function: {
-      name: "ask_vision",
-      description:
-        "Look at the WHOLE map to understand its overall layout and where things are " +
-        "(title, legend, tables, regions). Good for orientation, but small text may be hard to read here.",
-      parameters: {
-        type: "object",
-        properties: {
-          question: { type: "string", description: "What to look for on the whole map." },
+const reportTool: ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "create_report",
+    description:
+      "Generate a downloadable Word/PDF report for the user. Call this ONLY when the user asks for a " +
+      "report, summary document, briefing, or write-up. Gather details with the other tools first, then " +
+      "call create_report with a clear title and the COMPLETE report text. The map images are added automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "A short report title." },
+        body: {
+          type: "string",
+          description:
+            "The full report content as plain text (no markdown). Use headings like 'Findings:' on their " +
+            "own line and '- ' for list items.",
         },
-        required: ["question"],
       },
+      required: ["title", "body"],
     },
   },
-  {
-    type: "function",
-    function: {
-      name: "zoom_in",
-      description:
-        "Zoom into one region of the map at high magnification to READ SMALL TEXT accurately " +
-        "(legends, tables, dense labels, numbers). Always prefer this for reading detail. " +
-        `Valid regions: ${REGIONS.filter((r) => r !== "full").join(", ")}.`,
-      parameters: {
-        type: "object",
-        properties: {
-          region: {
-            type: "string",
-            enum: REGIONS.filter((r) => r !== "full"),
-            description: "Which part of the map to magnify.",
-          },
-          question: {
-            type: "string",
-            description: "What to read or look for in that region.",
-          },
-        },
-        required: ["region", "question"],
-      },
-    },
-  },
-];
+};
 
-// OpenStreetMap tools — always available, for verifying and enriching with real geography.
+function visionTools(mapCount: number): ChatCompletionTool[] {
+  const mapProp =
+    mapCount > 1
+      ? {
+          map: {
+            type: "integer" as const,
+            description: `Which map to look at, 1 to ${mapCount}.`,
+          },
+        }
+      : {};
+  const mapReq = mapCount > 1 ? ["map"] : [];
+  return [
+    {
+      type: "function",
+      function: {
+        name: "ask_vision",
+        description:
+          "Look at the WHOLE of a map to understand its layout (title, legend, tables, regions).",
+        parameters: {
+          type: "object",
+          properties: { ...mapProp, question: { type: "string", description: "What to look for." } },
+          required: [...mapReq, "question"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "zoom_in",
+        description:
+          "Zoom into one region of a map at high magnification to READ SMALL TEXT accurately. " +
+          `Valid regions: ${REGIONS.filter((r) => r !== "full").join(", ")}.`,
+        parameters: {
+          type: "object",
+          properties: {
+            ...mapProp,
+            region: {
+              type: "string",
+              enum: REGIONS.filter((r) => r !== "full"),
+              description: "Which part of the map to magnify.",
+            },
+            question: { type: "string", description: "What to read in that region." },
+          },
+          required: [...mapReq, "region", "question"],
+        },
+      },
+    },
+  ];
+}
+
 const osmTools: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
       name: "lookup_place",
       description:
-        "Check OpenStreetMap for whether a place or feature (a river, town, dam, lake) really exists, " +
-        "and get its real coordinates. Use this to VERIFY a name you read on the map and to catch misreads.",
+        "Check OpenStreetMap whether a place/feature (river, town, dam, lake) exists and get its real " +
+        "coordinates. Use to VERIFY a name you read and catch misreads.",
       parameters: {
         type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "The place/feature name to look up, e.g. 'Gurara River, Nigeria'.",
-          },
-        },
+        properties: { query: { type: "string", description: "Name to look up, e.g. 'Gurara River, Nigeria'." } },
         required: ["query"],
       },
     },
@@ -213,74 +236,38 @@ const osmTools: ChatCompletionTool[] = [
     function: {
       name: "find_waterways",
       description:
-        "Get the real rivers, lakes and dams that OpenStreetMap records in/around a named area. " +
-        "Use this to confirm the waterways on the map and to find ones the map may have missed.",
+        "Get the real rivers, lakes and dams OpenStreetMap records in/around an area. Use to confirm the " +
+        "map's waterways and find ones it may have missed.",
       parameters: {
         type: "object",
-        properties: {
-          area: {
-            type: "string",
-            description: "An area or place name, e.g. 'Abuja, Nigeria' or 'Lokoja'.",
-          },
-        },
+        properties: { area: { type: "string", description: "An area name, e.g. 'Abuja, Nigeria'." } },
         required: ["area"],
       },
     },
   },
 ];
 
-// Report tool — lets the agent compose and generate a downloadable report.
-const reportTool: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "create_report",
-    description:
-      "Generate a downloadable Word/PDF report for the user. Call this ONLY when the user asks for a " +
-      "report, summary document, briefing, or write-up. First gather the needed details with the other " +
-      "tools, then call create_report with a clear title and the COMPLETE report text in the body. " +
-      "The map image is added automatically.",
-    parameters: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "A short report title." },
-        body: {
-          type: "string",
-          description:
-            "The full report content as plain text (no markdown). Use headings like 'Findings:' on their " +
-            "own line and '- ' for list items. Include observations, OpenStreetMap verification, and conclusions.",
-        },
-      },
-      required: ["title", "body"],
-    },
-  },
-};
-
-/**
- * Agentic answer: the reasoning model answers the user's question and may call the
- * vision tools (ask_vision / zoom_in), OpenStreetMap tools (lookup_place /
- * find_waterways), and create_report — repeatedly — until it has gathered and
- * verified enough detail (and produced a report if asked).
- */
+/** Agentic answer across one or more maps. */
 export async function answerAboutMap(opts: {
   question: string;
-  imageBuffer?: Buffer; // present for image maps → enables the vision tools
-  overview?: string; // cached first-pass description of the map
-  textContext?: string; // for non-image files (PDF/data)
+  maps?: MapInput[]; // image maps in the chat → enables the vision tools
+  overview?: string;
+  textContext?: string;
   history: ChatTurn[];
   onCreateReport?: (args: { title: string; body: string }) => Promise<{ id: string } | null>;
-  forceReport?: boolean; // user clearly asked for a report → guarantee one is produced
+  forceReport?: boolean;
 }): Promise<{ answer: string; steps: Step[]; report?: { id: string; title: string } }> {
-  const hasVision = Boolean(opts.imageBuffer);
+  const maps = opts.maps ?? [];
+  const hasVision = maps.length > 0;
   const steps: Step[] = [];
   let report: { id: string; title: string } | undefined;
+
   const activeTools = [
-    ...(hasVision ? visionTools : []),
+    ...(hasVision ? visionTools(maps.length) : []),
     ...osmTools,
     ...(opts.onCreateReport ? [reportTool] : []),
   ];
 
-  // Wrap up an answer. If the user asked for a report but the model only wrote it
-  // as text (didn't call create_report), turn that text into the real report.
   const finalize = async (content: string) => {
     if (opts.forceReport && !report && opts.onCreateReport && content.trim().length > 40) {
       const first = content.split("\n").map((s) => s.trim()).find(Boolean) || "NIWA Map Report";
@@ -291,9 +278,10 @@ export async function answerAboutMap(opts: {
     return { answer: content, steps, report };
   };
 
+  const mapList = maps.map((m, i) => `${i + 1}) ${m.name}`).join("; ");
+
   const contextParts: string[] = [];
-  if (opts.overview)
-    contextParts.push(`INITIAL OVERVIEW OF THE MAP (verify details with the tools):\n${opts.overview}`);
+  if (opts.overview) contextParts.push(`INITIAL OVERVIEW:\n${opts.overview}`);
   if (opts.textContext) contextParts.push(`EXTRACTED FILE CONTENT:\n${opts.textContext}`);
   const context = contextParts.join("\n\n");
 
@@ -301,24 +289,20 @@ export async function answerAboutMap(opts: {
     PERSONA +
     "\n\n" +
     (hasVision
-      ? "A map IMAGE has been uploaded. You cannot see it directly, but you have vision tools:\n" +
-        "- ask_vision: view the WHOLE map (use first, to learn the layout).\n" +
-        "- zoom_in: magnify ONE region to read small text accurately (legends, tables, dense labels).\n" +
-        "Plan: use ask_vision for layout, then zoom_in on the relevant regions to read exact details. " +
-        "Treat their replies as your eyes; never say no image was provided.\n\n"
+      ? `This chat includes ${maps.length} map${maps.length > 1 ? "s" : ""}: ${mapList}.\n` +
+        "You cannot see them directly, but you have vision tools:\n" +
+        "- ask_vision: view a WHOLE map.\n- zoom_in: magnify ONE region of a map to read small text.\n" +
+        (maps.length > 1 ? "Pass the map number (1-based) to choose which map. " : "") +
+        "Use ask_vision for layout then zoom_in to read detail. Treat results as your eyes; never say no image was provided.\n\n"
       : "") +
-    "You also have OpenStreetMap tools (real-world geographic data):\n" +
-    "- lookup_place: confirm a name you read (river, town, dam) actually exists and get its real coordinates.\n" +
-    "- find_waterways: list the real rivers, lakes and dams in an area.\n" +
-    "Use these to VERIFY what you read on the map and to find features it may have missed. " +
-    "When the map and OpenStreetMap agree, say so. When they disagree (e.g. a name you read isn't found), " +
-    "flag it as a possible misread. When you use OpenStreetMap, say so (cite it).\n\n" +
+    "You also have OpenStreetMap tools: lookup_place and find_waterways. Use them to VERIFY what you read " +
+    "and to find features the maps may have missed. When map and OSM agree, say so; when a name isn't found, " +
+    "flag it as a possible misread. Cite OpenStreetMap when used.\n\n" +
     (opts.onCreateReport
-      ? "When the user asks for a REPORT, summary document, briefing or write-up, gather what you need with " +
-        "the tools, then call create_report with a title and the complete report body. Tell the user the report is ready.\n\n"
+      ? "When the user asks for a REPORT, briefing or write-up, gather what you need then call create_report.\n\n"
       : "") +
     NO_GUESSING +
-    "\nOnly state facts the tools actually confirmed. If a map detail could not be read clearly, say so and suggest a higher-resolution image.\n\n" +
+    "\nOnly state facts the tools confirmed. If something could not be read, say so.\n\n" +
     (context ? "---\n" + context + "\n---\n\n" : "") +
     PLAIN_TEXT_RULE;
 
@@ -328,23 +312,29 @@ export async function answerAboutMap(opts: {
     { role: "user", content: opts.question },
   ];
 
+  const pickMap = (idx: unknown): number => {
+    const n = Number(idx);
+    return Number.isFinite(n) && n >= 1 && n <= maps.length ? Math.floor(n) - 1 : 0;
+  };
+  const mapTag = (i: number) => (maps.length > 1 ? `${maps[i].name} · ` : "");
+
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const res = await withRetry(() => reasoningClient.chat.completions.create({
-      model: REASONING_MODEL,
-      temperature: 0,
-      max_tokens: 1200,
-      messages,
-      tools: activeTools.length ? activeTools : undefined,
-      tool_choice: activeTools.length ? "auto" : undefined,
-    }));
+    const res = await withRetry(() =>
+      reasoningClient.chat.completions.create({
+        model: REASONING_MODEL,
+        temperature: 0,
+        max_tokens: 1200,
+        messages,
+        tools: activeTools.length ? activeTools : undefined,
+        tool_choice: activeTools.length ? "auto" : undefined,
+      }),
+    );
 
     const msg = res.choices[0]?.message;
     if (!msg) break;
 
     const toolCalls = msg.tool_calls ?? [];
-    if (toolCalls.length === 0) {
-      return await finalize(msg.content ?? "");
-    }
+    if (toolCalls.length === 0) return await finalize(msg.content ?? "");
 
     messages.push(msg);
     for (const call of toolCalls) {
@@ -375,7 +365,8 @@ export async function answerAboutMap(opts: {
           } else {
             result = "Report tool is not available.";
           }
-        } else if (opts.imageBuffer) {
+        } else if (hasVision) {
+          const i = pickMap(args.map);
           const q = typeof args.question === "string" ? args.question : opts.question;
           const region: Region =
             name === "zoom_in" && (REGIONS as string[]).includes(args.region)
@@ -383,11 +374,11 @@ export async function answerAboutMap(opts: {
               : name === "zoom_in"
                 ? "center"
                 : "full";
-          const { finding, crop } = await cropAndAsk(opts.imageBuffer, region, q);
+          const { finding, crop } = await cropAndAsk(maps[i].buffer, region, q);
           result = finding;
           steps.push({
             kind: "vision",
-            label: region === "full" ? "Whole map" : `Zoom: ${region}`,
+            label: `${mapTag(i)}${region === "full" ? "Whole map" : `Zoom: ${region}`}`,
             query: q,
             thumbnail: await thumbnailDataUrl(crop),
             finding,
@@ -402,21 +393,22 @@ export async function answerAboutMap(opts: {
     }
   }
 
-  // Out of tool rounds — force a final answer with what was gathered.
-  const finalRes = await withRetry(() => reasoningClient.chat.completions.create({
-    model: REASONING_MODEL,
-    temperature: 0,
-    max_tokens: 1200,
-    messages: [
-      ...messages,
-      {
-        role: "user",
-        content:
-          "Give your best complete answer now, using only what the tools confirmed. " +
-          "Clearly note anything that could not be read. " +
-          PLAIN_TEXT_RULE,
-      },
-    ],
-  }));
+  const finalRes = await withRetry(() =>
+    reasoningClient.chat.completions.create({
+      model: REASONING_MODEL,
+      temperature: 0,
+      max_tokens: 1200,
+      messages: [
+        ...messages,
+        {
+          role: "user",
+          content:
+            "Give your best complete answer now, using only what the tools confirmed. " +
+            "Clearly note anything that could not be read. " +
+            PLAIN_TEXT_RULE,
+        },
+      ],
+    }),
+  );
   return await finalize(finalRes.choices[0]?.message?.content ?? "");
 }

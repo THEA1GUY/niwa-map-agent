@@ -27,12 +27,33 @@ export const maps = pgTable("maps", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
-/** Chat messages tied to a specific map. */
-export const messages = pgTable("messages", {
+/** A conversation that can span one or more maps. */
+export const chats = pgTable("chats", {
   id: uuid("id").defaultRandom().primaryKey(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+/** Which maps are included in a chat (a chat has many maps). */
+export const chatMaps = pgTable("chat_maps", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  chatId: uuid("chat_id")
+    .notNull()
+    .references(() => chats.id, { onDelete: "cascade" }),
   mapId: uuid("map_id")
     .notNull()
     .references(() => maps.id, { onDelete: "cascade" }),
+});
+
+/** Chat messages tied to a conversation (which may reference several maps). */
+export const messages = pgTable("messages", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  chatId: uuid("chat_id")
+    .notNull()
+    .references(() => chats.id, { onDelete: "cascade" }),
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -58,9 +79,9 @@ export const fileBlobs = pgTable("file_blobs", {
 /** Reports the AI agent composed and generated (downloadable as Word/PDF). */
 export const reports = pgTable("reports", {
   id: uuid("id").defaultRandom().primaryKey(),
-  mapId: uuid("map_id")
+  chatId: uuid("chat_id")
     .notNull()
-    .references(() => maps.id, { onDelete: "cascade" }),
+    .references(() => chats.id, { onDelete: "cascade" }),
   userId: uuid("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -72,4 +93,5 @@ export const reports = pgTable("reports", {
 
 export type User = typeof users.$inferSelect;
 export type MapRow = typeof maps.$inferSelect;
+export type ChatRow = typeof chats.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
