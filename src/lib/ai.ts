@@ -4,7 +4,11 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 /**
  * Two AI engines (both speak the OpenAI-style API, so the same SDK talks to both):
  *  - Groq runs the VISION model (Llama 4 Scout) that "looks" at map images.
- *  - OpenRouter runs the REASONING model (gpt-oss-120b) that writes the answers.
+ *  - The REASONING model (gpt-oss-120b) writes the answers.
+ *
+ * Reasoning defaults to Groq because OpenRouter is too slow for serverless time
+ * limits (it caused 504 timeouts on dense maps). Set REASONING_PROVIDER=openrouter
+ * to use OpenRouter instead. Both serve the same gpt-oss-120b model.
  */
 
 const groq = new OpenAI({
@@ -20,6 +24,9 @@ const openrouter = new OpenAI({
     "X-Title": process.env.OPENROUTER_APP_NAME ?? "NIWA Map Agent",
   },
 });
+
+const useOpenRouter = (process.env.REASONING_PROVIDER ?? "groq") === "openrouter";
+const reasoningClient = useOpenRouter ? openrouter : groq;
 
 const VISION_MODEL =
   process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct";
@@ -41,6 +48,7 @@ export async function analyzeImage(
   const res = await groq.chat.completions.create({
     model: VISION_MODEL,
     temperature: 0.2,
+    max_tokens: 1200, // keep it bounded so the request stays fast
     messages: [
       {
         role: "system",
@@ -52,7 +60,7 @@ export async function analyzeImage(
         content: [
           {
             type: "text",
-            text: `Analyse this map/scan in detail to help with: "${focus}". List every relevant feature you can see: title, scale, legend, north arrow, water bodies, channels, depth/soundings, contour or elevation values, place names, labels, coordinates, grid lines, and anything notable. Be specific.`,
+            text: `Analyse this map/scan to help with: "${focus}". Concisely capture the most important features: title, scale, legend, water bodies, rivers/channels, depth/elevation values, key place names, coordinates, and anything notable. Prioritise the most significant items rather than listing everything.`,
           },
           { type: "image_url", image_url: { url: base64DataUrl } },
         ],
@@ -62,7 +70,7 @@ export async function analyzeImage(
   return res.choices[0]?.message?.content ?? "";
 }
 
-/** Step 2 — OpenRouter reasoning: answer the user's question using the gathered context. */
+/** Step 2 — reasoning model: answer the user's question using the gathered context. */
 export async function reason(opts: {
   question: string;
   imageAnalysis?: string;
@@ -95,9 +103,10 @@ export async function reason(opts: {
     { role: "user", content: opts.question },
   ];
 
-  const res = await openrouter.chat.completions.create({
+  const res = await reasoningClient.chat.completions.create({
     model: REASONING_MODEL,
     temperature: 0.3,
+    max_tokens: 1500,
     messages,
   });
   return res.choices[0]?.message?.content ?? "";
