@@ -6,7 +6,9 @@ A web app for the **National Inland Waterways Authority**. Log in, upload a map
 
 - **Vision (looking at maps):** Llama 4 Scout, via **Groq**
 - **Reasoning / writing:** gpt-oss-120b, via **OpenRouter**
-- **Hosting:** Netlify · **Database:** Netlify DB (Neon Postgres) · **File storage:** Netlify Blobs
+- **Hosting:** Vercel · **Database:** Neon Postgres (free tier) · **File storage:** in the database (`file_blobs` table)
+
+> Live: **https://niwa-map-agent.vercel.app**
 
 > This is **Phase 1**: images, photos, and PDFs. Survey spreadsheets (Phase 2) and
 > full GIS files like shapefiles/GeoTIFF (Phase 3) come later.
@@ -29,7 +31,7 @@ Fill these into `.env.local`:
 
 | Setting | Where to get it |
 |---|---|
-| `DATABASE_URL` | Netlify dashboard → your site → **Storage** → create a Neon database → copy connection string |
+| `DATABASE_URL` | https://neon.tech → create a free project → copy the connection string |
 | `AUTH_SECRET` | Run `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` and paste the result |
 | `GROQ_API_KEY` | https://console.groq.com → API Keys |
 | `OPENROUTER_API_KEY` | https://openrouter.ai → Keys |
@@ -43,15 +45,24 @@ npm run db:push
 This reads `src/lib/schema.ts` and creates the `users`, `maps`, and `messages`
 tables in your Neon database.
 
-### 3. Deploy to Netlify
+### 3. Deploy to Vercel
 
-1. Push to GitHub (already done — see the repo).
-2. In Netlify: **Add new site → Import from GitHub →** pick this repo.
-3. Under **Storage**, add a **Neon** database (this fills `DATABASE_URL` automatically).
-4. Under **Site settings → Environment variables**, add: `AUTH_SECRET`,
-   `GROQ_API_KEY`, `OPENROUTER_API_KEY` (and optionally the model names).
-5. Deploy. Your site goes live at `https://<your-site>.netlify.app`.
-6. Visit the site, click **Create an account**, and you're in.
+Using the Vercel CLI (`npm i -g vercel`, then `vercel login`):
+
+```bash
+vercel link --yes                      # link this folder to a Vercel project
+# set each secret for production (repeat per variable):
+printf '%s' "<value>" | vercel env add DATABASE_URL production
+printf '%s' "<value>" | vercel env add AUTH_SECRET production
+printf '%s' "<value>" | vercel env add GROQ_API_KEY production
+printf '%s' "<value>" | vercel env add GROQ_VISION_MODEL production
+printf '%s' "<value>" | vercel env add OPENROUTER_API_KEY production
+printf '%s' "<value>" | vercel env add OPENROUTER_REASONING_MODEL production
+vercel --prod --yes                    # build + deploy
+```
+
+Or via the dashboard: **vercel.com → Add New → Project → import the GitHub repo**,
+add the six environment variables, and deploy.
 
 ---
 
@@ -86,7 +97,7 @@ src/
   lib/
     db.ts, schema.ts        # database
     auth.ts                 # passwords + sessions
-    storage.ts              # file storage (Netlify Blobs / local)
+    storage.ts              # file storage (base64 in the database)
     ai.ts                   # Groq vision + OpenRouter reasoning
     reports.ts              # Word + PDF generation
 ```
