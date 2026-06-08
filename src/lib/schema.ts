@@ -42,6 +42,17 @@ export const messages = pgTable("messages", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
+/**
+ * Raw bytes of uploaded files, stored as base64 in the database.
+ * Serverless hosts (Vercel/Netlify) have no persistent writable disk, so we
+ * keep file contents here instead of on the filesystem. Keyed by maps.blobKey.
+ */
+export const fileBlobs = pgTable("file_blobs", {
+  key: text("key").primaryKey(),
+  dataBase64: text("data_base64").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type MapRow = typeof maps.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;
