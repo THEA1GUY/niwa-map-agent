@@ -3,13 +3,14 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
+import { cropRegion, REGIONS, type Region } from "./image";
 
 /**
- * Two AI engines (both speak the OpenAI-style API):
- *  - Groq runs the VISION model (Llama 4 Scout) that "looks" at the map image.
- *  - The REASONING model (gpt-oss-120b) drives the conversation and can call the
- *    vision model as a TOOL — asking it specific follow-up questions about the
- *    image until it has enough to answer the user. This is the agentic loop.
+ * Agentic map analysis:
+ *  - Groq runs the VISION model (Llama 4 Scout) that reads the image.
+ *  - The REASONING model (gpt-oss-120b) drives, and can call the vision model as
+ *    tools: ask_vision (whole map, for layout) and zoom_in (a magnified region,
+ *    for reading small text accurately). It keeps querying until it can answer.
  *
  * Reasoning defaults to Groq (fast). Set REASONING_PROVIDER=openrouter to switch.
  */
@@ -36,43 +37,58 @@ const VISION_MODEL =
 const REASONING_MODEL =
   process.env.OPENROUTER_REASONING_MODEL ?? "openai/gpt-oss-120b";
 
-const MAX_TOOL_ROUNDS = 4;
+const MAX_TOOL_ROUNDS = 6;
 
-// Plain-text rule applied to every model so end users never see raw markdown.
 const PLAIN_TEXT_RULE = `Write for a general reader who may not understand markdown. Use plain text only:
 - Do NOT use markdown. No asterisks for bold, no "#" headings, no "|" tables, no backticks.
 - For a heading, write it as plain words on its own line ending with a colon, e.g. "Rivers shown:".
 - For a list, start each line with "- " (a hyphen and a space).
 - Keep paragraphs short and clear.`;
 
+// Accuracy rule shared by every model call.
+const NO_GUESSING = `Accuracy is critical. Report ONLY what is clearly legible.
+- Transcribe exact text, names, numbers and table values that you can actually read.
+- If something is too small, blurry, or cut off to read with confidence, say it is "not clearly legible" — do NOT guess or invent place names, river names, numbers, or distances.
+- It is better to say you cannot read something than to make it up.`;
+
 const PERSONA = `You are a research assistant for the National Inland Waterways Authority (NIWA) of Nigeria.
 You help researchers interpret maps, hydrographic charts, bathymetric surveys, and waterway documents.
-Be precise. Clearly separate what is OBSERVED on the map from what is INFERRED. If something cannot be
-determined from the material, say so plainly rather than guessing.`;
+Clearly separate what is OBSERVED from what is INFERRED.`;
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
-/** Vision call: answer a SPECIFIC question about the image. Used as the agent's tool. */
-export async function analyzeImage(
-  base64DataUrl: string,
+/** One vision call against a (possibly cropped + magnified) region of the image. */
+export async function vision(
+  imageBuffer: Buffer,
+  region: Region,
   question: string,
 ): Promise<string> {
+  const cropped = await cropRegion(imageBuffer, region);
+  const dataUrl = `data:image/png;base64,${cropped.toString("base64")}`;
   const res = await groq.chat.completions.create({
     model: VISION_MODEL,
-    temperature: 0.2,
-    max_tokens: 900,
+    temperature: 0,
+    max_tokens: 1000,
     messages: [
       {
         role: "system",
         content:
-          "You are an expert cartographic and hydrographic image analyst. Look at the image and answer the question factually and specifically, reading any visible text, labels, legends, tables, and values. " +
+          "You are an expert at reading maps and charts. Read the image carefully and answer the question. " +
+          NO_GUESSING +
+          " " +
           PLAIN_TEXT_RULE,
       },
       {
         role: "user",
         content: [
-          { type: "text", text: question },
-          { type: "image_url", image_url: { url: base64DataUrl } },
+          {
+            type: "text",
+            text:
+              (region === "full"
+                ? "This is the full map. "
+                : `This is a magnified view of the "${region}" region of the map. `) + question,
+          },
+          { type: "image_url", image_url: { url: dataUrl } },
         ],
       },
     ],
@@ -80,58 +96,80 @@ export async function analyzeImage(
   return res.choices[0]?.message?.content ?? "";
 }
 
-const visionTool: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "ask_vision",
-    description:
-      "Look at the uploaded map image and get an answer to a specific visual question " +
-      "(e.g. 'read the legend', 'read every row of the table on the right', 'list the rivers " +
-      "labelled near Abuja', 'what is the scale bar value'). Call this as many times as needed " +
-      "to gather details before answering the user.",
-    parameters: {
-      type: "object",
-      properties: {
-        question: {
-          type: "string",
-          description: "A specific question about what is visible in the map image.",
+const tools: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "ask_vision",
+      description:
+        "Look at the WHOLE map to understand its overall layout and where things are " +
+        "(title, legend, tables, regions). Good for orientation, but small text may be hard to read here.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "What to look for on the whole map." },
         },
+        required: ["question"],
       },
-      required: ["question"],
     },
   },
-};
+  {
+    type: "function",
+    function: {
+      name: "zoom_in",
+      description:
+        "Zoom into one region of the map at high magnification to READ SMALL TEXT accurately " +
+        "(legends, tables, dense labels, numbers). Always prefer this for reading detail. " +
+        `Valid regions: ${REGIONS.filter((r) => r !== "full").join(", ")}.`,
+      parameters: {
+        type: "object",
+        properties: {
+          region: {
+            type: "string",
+            enum: REGIONS.filter((r) => r !== "full"),
+            description: "Which part of the map to magnify.",
+          },
+          question: {
+            type: "string",
+            description: "What to read or look for in that region.",
+          },
+        },
+        required: ["region", "question"],
+      },
+    },
+  },
+];
 
 /**
- * Agentic answer: the reasoning model answers the user's question, and may call the
- * vision model (ask_vision) repeatedly to inspect the image until it can answer.
+ * Agentic answer: the reasoning model answers the user's question and may call the
+ * vision tools (ask_vision / zoom_in) repeatedly until it has read enough detail.
  */
 export async function answerAboutMap(opts: {
   question: string;
-  imageDataUrl?: string; // present for image maps → enables the ask_vision tool
-  overview?: string; // a cached first-pass description of the image
+  imageBuffer?: Buffer; // present for image maps → enables the vision tools
+  overview?: string; // cached first-pass description of the map
   textContext?: string; // for non-image files (PDF/data)
   history: ChatTurn[];
 }): Promise<string> {
+  const hasVision = Boolean(opts.imageBuffer);
+
   const contextParts: string[] = [];
   if (opts.overview)
-    contextParts.push(`INITIAL OVERVIEW OF THE UPLOADED MAP:\n${opts.overview}`);
-  if (opts.textContext)
-    contextParts.push(`EXTRACTED FILE CONTENT:\n${opts.textContext}`);
+    contextParts.push(`INITIAL OVERVIEW OF THE MAP (verify details with the tools):\n${opts.overview}`);
+  if (opts.textContext) contextParts.push(`EXTRACTED FILE CONTENT:\n${opts.textContext}`);
   const context = contextParts.join("\n\n");
-
-  const hasVision = Boolean(opts.imageDataUrl);
 
   const systemContent =
     PERSONA +
     "\n\n" +
     (hasVision
-      ? "A map IMAGE has been uploaded. You cannot see it directly, but you have a tool called " +
-        "ask_vision that inspects the image and answers specific questions about it. When the user " +
-        "asks about the map, call ask_vision as many times as needed (read the legend, tables, " +
-        "labels, specific regions) until you have enough detail, then give a complete answer. " +
-        "Treat ask_vision's replies as a faithful first-hand view of the map. Never tell the user " +
-        "that no image was provided.\n\n"
+      ? "A map IMAGE has been uploaded. You cannot see it directly, but you have two tools:\n" +
+        "- ask_vision: view the WHOLE map (use first, to learn the layout).\n" +
+        "- zoom_in: magnify ONE region to read small text accurately (use this to read legends, tables, and dense labels).\n" +
+        "Plan: first use ask_vision to find where things are, then zoom_in on the relevant regions to read the exact details before answering. " +
+        "Call the tools as many times as needed. Treat their replies as your eyes; never say no image was provided.\n\n" +
+        NO_GUESSING +
+        "\nOnly state facts the tools actually confirmed. If a detail could not be read clearly, tell the user it was not legible and suggest uploading a higher-resolution image.\n\n"
       : "") +
     (context ? "---\n" + context + "\n---\n\n" : "") +
     PLAIN_TEXT_RULE;
@@ -145,10 +183,10 @@ export async function answerAboutMap(opts: {
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const res = await reasoningClient.chat.completions.create({
       model: REASONING_MODEL,
-      temperature: 0.3,
+      temperature: 0,
       max_tokens: 1500,
       messages,
-      tools: hasVision ? [visionTool] : undefined,
+      tools: hasVision ? tools : undefined,
       tool_choice: hasVision ? "auto" : undefined,
     });
 
@@ -160,7 +198,6 @@ export async function answerAboutMap(opts: {
       return msg.content ?? "";
     }
 
-    // Run each requested vision lookup and feed the results back.
     messages.push(msg);
     for (const call of toolCalls) {
       if (call.type !== "function") continue;
@@ -168,7 +205,16 @@ export async function answerAboutMap(opts: {
       try {
         const args = JSON.parse(call.function.arguments || "{}");
         const q = typeof args.question === "string" ? args.question : opts.question;
-        result = opts.imageDataUrl ? await analyzeImage(opts.imageDataUrl, q) : "No image available.";
+        if (!opts.imageBuffer) {
+          result = "No image available.";
+        } else if (call.function.name === "zoom_in") {
+          const region = (REGIONS as string[]).includes(args.region)
+            ? (args.region as Region)
+            : "center";
+          result = await vision(opts.imageBuffer, region, q);
+        } else {
+          result = await vision(opts.imageBuffer, "full", q);
+        }
       } catch {
         result = "Vision lookup failed.";
       }
@@ -176,17 +222,18 @@ export async function answerAboutMap(opts: {
     }
   }
 
-  // Ran out of tool rounds — force a final answer with what we have.
+  // Out of tool rounds — force a final answer with what was gathered.
   const finalRes = await reasoningClient.chat.completions.create({
     model: REASONING_MODEL,
-    temperature: 0.3,
+    temperature: 0,
     max_tokens: 1500,
     messages: [
       ...messages,
       {
         role: "user",
         content:
-          "Based on everything gathered so far, give your best complete answer to my question now. " +
+          "Give your best complete answer now, using only what the tools confirmed. " +
+          "Clearly note anything that could not be read. " +
           PLAIN_TEXT_RULE,
       },
     ],

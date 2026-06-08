@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { analyzeImage, answerAboutMap, type ChatTurn } from "@/lib/ai";
+import { vision, answerAboutMap, type ChatTurn } from "@/lib/ai";
 import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { maps, messages } from "@/lib/schema";
@@ -36,18 +36,19 @@ export async function POST(
 
   // 1. Prepare the map for the agent: image maps get the ask_vision tool + a
   //    cached first-pass overview; other files get a text note.
-  let imageDataUrl: string | undefined;
+  let imageBuffer: Buffer | undefined;
   let overview = map.analysis ?? undefined;
   let textContext: string | undefined;
 
   if (map.kind === "image") {
     const bytes = await getFile(map.blobKey);
     if (bytes) {
-      imageDataUrl = `data:${map.mimeType};base64,${bytes.toString("base64")}`;
+      imageBuffer = bytes;
       if (!overview) {
         try {
-          overview = await analyzeImage(
-            imageDataUrl,
+          overview = await vision(
+            bytes,
+            "full",
             "Give a concise overview of this map: its title, the region it covers, the main rivers and water bodies, and what type of map it is.",
           );
           await db.update(maps).set({ analysis: overview }).where(eq(maps.id, map.id));
@@ -74,7 +75,7 @@ export async function POST(
   // 3. Agentic answer: reasoning model can query the vision model as needed.
   let answer: string;
   try {
-    answer = await answerAboutMap({ question, imageDataUrl, overview, textContext, history });
+    answer = await answerAboutMap({ question, imageBuffer, overview, textContext, history });
   } catch (err) {
     console.error("[chat] answer step failed", err);
     return NextResponse.json(
