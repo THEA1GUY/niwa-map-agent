@@ -1,0 +1,94 @@
+import { and, asc, eq } from "drizzle-orm";
+import { NextResponse } from "next/server";
+import { analyzeImage, reason, type ChatTurn } from "@/lib/ai";
+import { getCurrentUser } from "@/lib/auth";
+import { db } from "@/lib/db";
+import { maps, messages } from "@/lib/schema";
+import { getFile } from "@/lib/storage";
+import { chatSchema } from "@/lib/validation";
+
+export const maxDuration = 60; // allow time for two model calls
+
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Not signed in." }, { status: 401 });
+
+  const { id } = await params;
+  const body = await req.json().catch(() => null);
+  const parsed = chatSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message ?? "Invalid question" },
+      { status: 400 },
+    );
+  }
+  const question = parsed.data.question;
+
+  const [map] = await db
+    .select()
+    .from(maps)
+    .where(and(eq(maps.id, id), eq(maps.userId, user.id)))
+    .limit(1);
+  if (!map) return NextResponse.json({ error: "Map not found." }, { status: 404 });
+
+  // 1. Vision analysis of the image (cached on the map after the first run).
+  let imageAnalysis = map.analysis ?? undefined;
+  let textContext: string | undefined;
+
+  if (map.kind === "image") {
+    if (!imageAnalysis) {
+      const bytes = await getFile(map.blobKey);
+      if (bytes) {
+        const dataUrl = `data:${map.mimeType};base64,${bytes.toString("base64")}`;
+        try {
+          imageAnalysis = await analyzeImage(
+            dataUrl,
+            "general detailed interpretation of this map for waterways research",
+          );
+          await db
+            .update(maps)
+            .set({ analysis: imageAnalysis })
+            .where(eq(maps.id, map.id));
+        } catch (err) {
+          console.error("[chat] vision step failed", err);
+        }
+      }
+    }
+  } else {
+    textContext = `The uploaded file "${map.fileName}" is a ${map.kind.toUpperCase()} file. Direct content extraction for this file type is not available yet (planned for a later phase), so answer using general waterways/cartographic knowledge and clearly note this limitation.`;
+  }
+
+  // 2. Load recent conversation history.
+  const prior = await db
+    .select()
+    .from(messages)
+    .where(eq(messages.mapId, map.id))
+    .orderBy(asc(messages.createdAt));
+  const history: ChatTurn[] = prior.slice(-20).map((m) => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: m.content,
+  }));
+
+  // 3. Reasoning model produces the answer.
+  let answer: string;
+  try {
+    answer = await reason({ question, imageAnalysis, textContext, history });
+  } catch (err) {
+    console.error("[chat] reasoning step failed", err);
+    return NextResponse.json(
+      { error: "The AI service did not respond. Check your API keys and try again." },
+      { status: 502 },
+    );
+  }
+
+  // 4. Persist both turns.
+  await db.insert(messages).values([
+    { mapId: map.id, userId: user.id, role: "user", content: question },
+    { mapId: map.id, userId: user.id, role: "assistant", content: answer },
+  ]);
+
+  return NextResponse.json({ answer });
+}
