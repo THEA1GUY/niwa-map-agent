@@ -2,12 +2,15 @@ import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import * as schema from "./schema";
 
-const connectionString = process.env.DATABASE_URL;
+// Netlify DB (Neon) injects NETLIFY_DATABASE_URL automatically; locally we use
+// DATABASE_URL from .env.local. Accept either.
+const connectionString =
+  process.env.DATABASE_URL || process.env.NETLIFY_DATABASE_URL;
 
 if (!connectionString) {
   // Surfaced clearly instead of a confusing runtime crash deep in a query.
   console.warn(
-    "[db] DATABASE_URL is not set. Copy .env.example to .env.local and add your Netlify DB / Neon connection string.",
+    "[db] No database URL set. On Netlify this comes from NETLIFY_DATABASE_URL; locally, add DATABASE_URL to .env.local.",
   );
 }
 
