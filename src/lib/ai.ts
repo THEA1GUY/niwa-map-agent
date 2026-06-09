@@ -47,6 +47,7 @@ const REASONING_MODEL =
     : (process.env.OPENROUTER_REASONING_MODEL ?? "openai/gpt-oss-120b");
 
 const MAX_TOOL_ROUNDS = 4;
+const REPORT_TOOL_ROUNDS = 2; // report requests gather briefly, then we force the report call
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -390,7 +391,8 @@ export async function answerAboutMap(opts: {
   };
   const mapTag = (i: number) => (maps.length > 1 ? `${maps[i].name} · ` : "");
 
-  for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+  const maxRounds = opts.forceReport ? REPORT_TOOL_ROUNDS : MAX_TOOL_ROUNDS;
+  for (let round = 0; round < maxRounds; round++) {
     const res = await withRetry(() =>
       reasoningClient.chat.completions.create({
         model: REASONING_MODEL,
