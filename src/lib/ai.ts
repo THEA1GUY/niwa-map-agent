@@ -293,11 +293,54 @@ export async function answerAboutMap(opts: {
   ];
 
   const finalize = async (content: string) => {
-    if (opts.forceReport && !report && opts.onCreateReport && content.trim().length > 40) {
-      const first = content.split("\n").map((s) => s.trim()).find(Boolean) || "NIWA Map Report";
-      const title = (first.replace(/[:–—-].*$/, "").trim() || "NIWA Map Report").slice(0, 80);
-      const created = await opts.onCreateReport({ title, body: content });
-      if (created) report = { id: created.id, title };
+    if (opts.forceReport && !report && opts.onCreateReport) {
+      // Force the model to call create_report (don't rely on it choosing to).
+      try {
+        const forced = await withRetry(() =>
+          reasoningClient.chat.completions.create({
+            model: REASONING_MODEL,
+            temperature: 0,
+            max_tokens: 1500,
+            messages: [
+              ...messages,
+              {
+                role: "user",
+                content:
+                  "Produce the report now by CALLING the create_report tool with a clear title and the " +
+                  "COMPLETE report body in plain text (based on everything gathered). Do not answer with text — call the tool.",
+              },
+            ],
+            tools: [reportTool],
+            tool_choice: { type: "function", function: { name: "create_report" } },
+          }),
+        );
+        const call = forced.choices[0]?.message?.tool_calls?.find(
+          (c) => c.type === "function" && c.function.name === "create_report",
+        );
+        if (call && call.type === "function") {
+          const args = JSON.parse(call.function.arguments || "{}");
+          const title = String(args.title ?? "NIWA Map Report");
+          const body = String(args.body ?? content);
+          const created = await opts.onCreateReport({ title, body });
+          if (created) {
+            report = { id: created.id, title };
+            return {
+              answer: content || `Your report "${title}" is ready to download below.`,
+              steps,
+              report,
+            };
+          }
+        }
+      } catch {
+        /* fall through to text fallback */
+      }
+      // Fallback: turn the text answer into a report.
+      if (!report && content.trim().length > 40) {
+        const first = content.split("\n").map((s) => s.trim()).find(Boolean) || "NIWA Map Report";
+        const title = (first.replace(/[:–—-].*$/, "").trim() || "NIWA Map Report").slice(0, 80);
+        const created = await opts.onCreateReport({ title, body: content });
+        if (created) report = { id: created.id, title };
+      }
     }
     return { answer: content, steps, report };
   };
